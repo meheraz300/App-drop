@@ -1,0 +1,212 @@
+@import "tailwindcss";
+
+:root {
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  
+  /* B2. Light Mode Tokens */
+  --lg-accent-start: #4F5BD5;
+  --lg-accent-end: #7B63E0;
+  --lg-on-accent: #FFFFFF;
+  --lg-ink: #14205C;
+  --lg-ink-muted: #3B4775;
+  --lg-glass-base: 255, 255, 255;
+  --lg-shadow-color: 30, 40, 100; /* #1E2864 */
+  
+  --lg-tint: 0.40;
+  --lg-tint-secondary: 0.18;
+  --lg-glass-border: rgba(255, 255, 255, 0.42);
+  --lg-top-highlight: rgba(255, 255, 255, 0.60);
+  --lg-specular: rgba(255, 255, 255, 0.33);
+
+  --lg-success: #0B6B4D;
+  --lg-success-bg: #D2F3E6;
+  --lg-info: #0B5C73;
+  --lg-info-bg: #CDEFF8;
+  --lg-neutral: #434B72;
+  --lg-neutral-bg: #E4E7F3;
+  --lg-error: #B3261E;
+  --lg-error-bg: #FDE3E1;
+  --lg-badge-red: #E5352B;
+
+  /* Backdrop gradient */
+  --lg-backdrop-base: linear-gradient(160deg, #DDE6FF 0%, #EFE7FF 100%);
+  
+  /* Shadows */
+  --lg-shadow-1: 0 8px 8px rgba(var(--lg-shadow-color), 0.21);
+  --lg-shadow-2: 0 12px 14px rgba(var(--lg-shadow-color), 0.26);
+  --lg-shadow-3: 0 16px 24px rgba(var(--lg-shadow-color), 0.30);
+}
+
+.dark {
+  /* B2. Dark Mode Tokens */
+  --lg-accent-start: #A4AEFF;
+  --lg-accent-end: #B79CFF;
+  --lg-on-accent: #0E1230;
+  --lg-ink: #F2F5FF;
+  --lg-ink-muted: #C3CCEA;
+  --lg-glass-base: 60, 70, 120;
+  --lg-shadow-color: 0, 0, 0;
+  
+  --lg-tint: 0.22;
+  --lg-tint-secondary: 0.099;
+  --lg-glass-border: rgba(255, 255, 255, 0.29);
+  --lg-top-highlight: rgba(255, 255, 255, 0.42);
+  --lg-specular: rgba(255, 255, 255, 0.23);
+
+  --lg-success: #7FE3C3;
+  --lg-success-bg: #17423A;
+  --lg-info: #8BDDF2;
+  --lg-info-bg: #143E4D;
+  --lg-neutral: #C9CEEE;
+  --lg-neutral-bg: #2F3453;
+  --lg-error: #F2B8B5;
+  --lg-error-bg: #4A2220;
+  --lg-badge-red: #E5352B;
+
+  /* Backdrop gradient */
+  --lg-backdrop-base: linear-gradient(160deg, #141A33 0%, #1E1838 100%);
+  
+  /* Shadows */
+  --lg-shadow-1: 0 8px 8px rgba(var(--lg-shadow-color), 0.21);
+  --lg-shadow-2: 0 12px 14px rgba(var(--lg-shadow-color), 0.26);
+  --lg-shadow-3: 0 16px 24px rgba(var(--lg-shadow-color), 0.30);
+}
+
+/* B3. Static Backdrop Container with 3 radial blobs */
+.liquid-glass-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: var(--lg-backdrop-base);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.liquid-glass-backdrop::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: 
+    radial-gradient(circle at 18% 12%, rgba(123, 140, 255, 0.45) 0%, transparent 44%),
+    radial-gradient(circle at 88% 28%, rgba(199, 155, 255, 0.45) 0%, transparent 42%),
+    radial-gradient(circle at 28% 88%, rgba(110, 200, 255, 0.45) 0%, transparent 43%);
+  pointer-events: none;
+}
+
+/* B4. Reusable Glass Recipe Surface */
+.glass-surface {
+  position: relative;
+  background: linear-gradient(135deg, rgba(var(--lg-glass-base), var(--lg-tint)) 0%, rgba(var(--lg-glass-base), var(--lg-tint-secondary)) 100%);
+  border: 1px solid var(--lg-glass-border);
+  box-shadow: 
+    inset 0 1.5px 0 0 var(--lg-top-highlight),
+    var(--lg-shadow-1);
+  color: var(--lg-ink);
+  transition: transform 150ms cubic-bezier(0, 0, 0.2, 1), box-shadow 150ms ease-out;
+}
+
+/* Specular reflection overlay */
+.glass-surface::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(circle at 20% -10%, var(--lg-specular) 0%, transparent 55%);
+  pointer-events: none;
+}
+
+/* Blurred Floating Bars (B4 / B14: 18px blur + 1.6x saturation) */
+.glass-surface-floating {
+  position: relative;
+  background: linear-gradient(135deg, rgba(var(--lg-glass-base), var(--lg-tint)) 0%, rgba(var(--lg-glass-base), var(--lg-tint-secondary)) 100%);
+  backdrop-filter: blur(18px) saturate(1.6);
+  -webkit-backdrop-filter: blur(18px) saturate(1.6);
+  border: 1px solid var(--lg-glass-border);
+  box-shadow: 
+    inset 0 1.5px 0 0 var(--lg-top-highlight),
+    var(--lg-shadow-2);
+  color: var(--lg-ink);
+}
+
+.glass-surface-floating::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(circle at 20% -10%, var(--lg-specular) 0%, transparent 55%);
+  pointer-events: none;
+}
+
+/* Elevation Level 3 for sheets, dialogs */
+.glass-surface-dialog {
+  position: relative;
+  background: linear-gradient(135deg, rgba(var(--lg-glass-base), var(--lg-tint)) 0%, rgba(var(--lg-glass-base), var(--lg-tint-secondary)) 100%);
+  backdrop-filter: blur(18px) saturate(1.6);
+  -webkit-backdrop-filter: blur(18px) saturate(1.6);
+  border: 1px solid var(--lg-glass-border);
+  box-shadow: 
+    inset 0 1.5px 0 0 var(--lg-top-highlight),
+    var(--lg-shadow-3);
+  color: var(--lg-ink);
+}
+
+/* Common Interactive Press State (B9 / B11) */
+.glass-pressable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.glass-pressable:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.glass-pressable:focus-visible {
+  outline: 3px solid var(--lg-accent-start);
+  outline-offset: 2px;
+}
+
+.glass-pressable:disabled {
+  opacity: 0.40;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+/* Accent Gradient Primary Button (B9) */
+.glass-btn-primary {
+  height: 56px;
+  padding: 0 24px;
+  border-radius: 9999px;
+  background: linear-gradient(135deg, var(--lg-accent-start) 0%, var(--lg-accent-end) 100%);
+  color: var(--lg-on-accent);
+  font-weight: 700;
+  font-size: 16px;
+  border: 1.5px solid rgba(255, 255, 255, 0.55);
+  box-shadow: 0 8px 8px rgba(79, 91, 213, 0.40);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: transform 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+.glass-btn-primary:active:not(:disabled) {
+  transform: scale(0.98);
+  box-shadow: 0 4px 6px rgba(79, 91, 213, 0.30);
+}
+
+.glass-btn-primary:focus-visible {
+  outline: 3px solid var(--lg-accent-start);
+  outline-offset: 2px;
+}
+
+.glass-btn-primary:disabled {
+  opacity: 0.40;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Accessible focus outline */
+*:focus-visible {
+  outline: 3px solid var(--lg-accent-start);
+  outline-offset: 2px;
+}

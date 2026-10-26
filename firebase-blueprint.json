@@ -1,0 +1,154 @@
+{
+  "entities": {
+    "App": {
+      "title": "App",
+      "description": "Android application metadata and publication pointer",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "packageName": { "type": "string", "maxLength": 150, "pattern": "^[a-zA-Z0-9_]+(\\.[a-zA-Z0-9_]+)+$" },
+        "shortDescription": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 5000 },
+        "category": { "type": "string", "maxLength": 50 },
+        "tags": { "type": "array" },
+        "iconPath": { "type": "string", "maxLength": 500 },
+        "screenshotPaths": { "type": "array" },
+        "latestPublishedVersionId": { "type": "string", "maxLength": 128 },
+        "featured": { "type": "boolean" },
+        "featuredOrder": { "type": "number" },
+        "visibility": { "type": "string", "enum": ["public", "unlisted"] },
+        "status": { "type": "string", "enum": ["published", "draft", "archived"] },
+        "mandatoryUpdate": { "type": "boolean" },
+        "minimumSupportedVersionCode": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "archivedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "packageName", "shortDescription", "category", "visibility", "status", "createdAt", "updatedAt"]
+    },
+    "AppVersion": {
+      "title": "AppVersion",
+      "description": "Historical and latest published Android application APK versions",
+      "type": "object",
+      "properties": {
+        "versionName": { "type": "string", "maxLength": 50 },
+        "versionCode": { "type": "number" },
+        "releaseNotes": { "type": "string", "maxLength": 5000 },
+        "apkPath": { "type": "string", "maxLength": 500 },
+        "apkSizeBytes": { "type": "number" },
+        "sha256": { "type": "string", "maxLength": 64 },
+        "signingCertificateSha256": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["uploading", "validating", "validated", "publishing", "published", "failed", "archived"] },
+        "isLatest": { "type": "boolean" },
+        "publishedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["versionName", "versionCode", "apkPath", "apkSizeBytes", "sha256", "status", "createdAt"]
+    },
+    "UploadSession": {
+      "title": "UploadSession",
+      "description": "Transient upload and verification workflow session for APK files",
+      "type": "object",
+      "properties": {
+        "appId": { "type": "string", "maxLength": 128 },
+        "versionId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["created", "uploading", "uploaded", "validating", "validated", "publishing", "published", "failed", "cancelled"] },
+        "originalFileName": { "type": "string", "maxLength": 255 },
+        "expectedSizeBytes": { "type": "number" },
+        "uploadPath": { "type": "string", "maxLength": 500 },
+        "uploadedAt": { "type": "string", "format": "date-time" },
+        "validationStartedAt": { "type": "string", "format": "date-time" },
+        "validatedAt": { "type": "string", "format": "date-time" },
+        "errorCode": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["appId", "status", "originalFileName", "expectedSizeBytes", "uploadPath", "createdAt"]
+    },
+    "DownloadEvent": {
+      "title": "DownloadEvent",
+      "description": "Server-observed download request event",
+      "type": "object",
+      "properties": {
+        "appId": { "type": "string", "maxLength": 128 },
+        "versionId": { "type": "string", "maxLength": 128 },
+        "eventType": { "type": "string", "enum": ["download_url_issued"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "requestId": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["appId", "versionId", "eventType", "createdAt", "requestId"]
+    },
+    "DownloadStat": {
+      "title": "DownloadStat",
+      "description": "Aggregated daily download counts",
+      "type": "object",
+      "properties": {
+        "date": { "type": "string", "maxLength": 20 },
+        "appId": { "type": "string", "maxLength": 128 },
+        "versionId": { "type": "string", "maxLength": 128 },
+        "requestCount": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["date", "appId", "requestCount", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Administrative actions audit log",
+      "type": "object",
+      "properties": {
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorEmail": { "type": "string", "maxLength": 200 },
+        "action": { "type": "string", "maxLength": 100 },
+        "appId": { "type": "string", "maxLength": 128 },
+        "versionId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "requestId": { "type": "string", "maxLength": 128 },
+        "result": { "type": "string", "enum": ["success", "failure"] },
+        "details": { "type": "string", "maxLength": 2000 }
+      },
+      "required": ["actorUid", "action", "createdAt", "requestId", "result"]
+    },
+    "SystemConfig": {
+      "title": "SystemConfig",
+      "description": "Operational system settings such as maintenance mode and limits",
+      "type": "object",
+      "properties": {
+        "maintenanceMode": { "type": "boolean" },
+        "maintenanceMessage": { "type": "string", "maxLength": 500 },
+        "maxUploadSizeBytes": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["maintenanceMode", "maxUploadSizeBytes", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/apps/{appId}": {
+      "schema": { "$ref": "#/entities/App" },
+      "description": "Top-level application documents"
+    },
+    "/apps/{appId}/versions/{versionId}": {
+      "schema": { "$ref": "#/entities/AppVersion" },
+      "description": "Subcollection of version records for each application"
+    },
+    "/uploadSessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/UploadSession" },
+      "description": "Upload sessions managed by backend/admin"
+    },
+    "/downloadEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/DownloadEvent" },
+      "description": "Log of download link generation events"
+    },
+    "/downloadStats/{statId}": {
+      "schema": { "$ref": "#/entities/DownloadStat" },
+      "description": "Daily aggregated download counters"
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Administrative audit trail"
+    },
+    "/systemConfig/{configId}": {
+      "schema": { "$ref": "#/entities/SystemConfig" },
+      "description": "System operational configurations"
+    }
+  }
+}

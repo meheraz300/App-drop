@@ -1,0 +1,115 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email == "mh3620305@gmail.com" && request.auth.token.email_verified == true) ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidApp(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.packageName is string && data.packageName.size() > 0 && data.packageName.size() <= 150 &&
+             data.shortDescription is string && data.shortDescription.size() <= 200 &&
+             data.category is string && data.category.size() <= 50 &&
+             data.visibility in ['public', 'unlisted'] &&
+             data.status in ['published', 'draft', 'archived'];
+    }
+
+    function isValidAppVersion(data) {
+      return data.versionName is string && data.versionName.size() > 0 && data.versionName.size() <= 50 &&
+             data.versionCode is int &&
+             data.apkPath is string && data.apkPath.size() <= 500 &&
+             data.apkSizeBytes is number &&
+             data.sha256 is string && data.sha256.size() <= 64 &&
+             data.status in ['uploading', 'validating', 'validated', 'publishing', 'published', 'failed', 'archived'];
+    }
+
+    // Apps Collection
+    match /apps/{appId} {
+      allow get: if (resource.data.visibility == 'public' && resource.data.status == 'published') || isAdmin();
+      allow list: if (resource.data.visibility == 'public' && resource.data.status == 'published') || isAdmin();
+
+      allow create: if isAdmin() && isValidId(appId) && isValidApp(incoming());
+      allow update: if isAdmin() && isValidId(appId) && isValidApp(incoming());
+      allow delete: if isAdmin() && isValidId(appId);
+
+      // Versions subcollection
+      match /versions/{versionId} {
+        allow get: if (resource.data.status == 'published') || isAdmin();
+        allow list: if (resource.data.status == 'published') || isAdmin();
+
+        allow create: if isAdmin() && isValidId(versionId) && isValidAppVersion(incoming());
+        allow update: if isAdmin() && isValidId(versionId) && isValidAppVersion(incoming());
+        allow delete: if isAdmin() && isValidId(versionId);
+      }
+    }
+
+    // Upload Sessions
+    match /uploadSessions/{sessionId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(sessionId);
+    }
+
+    // Download Events (Append-only)
+    match /downloadEvents/{eventId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(eventId) &&
+                       incoming().keys().hasAll(['appId', 'versionId', 'eventType', 'createdAt', 'requestId']) &&
+                       incoming().eventType == 'download_url_issued';
+      allow update, delete: if false;
+    }
+
+    // Download Stats
+    match /downloadStats/{statId} {
+      allow get, list: if true;
+      allow write: if isAdmin() && isValidId(statId);
+    }
+
+    // Audit Logs (Append-only by Admin)
+    match /auditLogs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() && isValidId(logId) &&
+                       incoming().keys().hasAll(['actorUid', 'action', 'createdAt', 'requestId', 'result']);
+      allow update, delete: if false;
+    }
+
+    // System Config
+    match /systemConfig/{configId} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow write: if isAdmin() && isValidId(configId);
+    }
+
+    // Admin authorization reference records
+    match /admins/{adminId} {
+      allow get, list: if isAdmin();
+      allow write: if false;
+    }
+  }
+}

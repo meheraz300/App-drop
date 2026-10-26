@@ -1,0 +1,1075 @@
+MASTER PRODUCT REQUIREMENTS DOCUMENT (PRD) APP DISTRIBUTION WEBSITE
+Version 1.0 — Developer-ready specification for Google AI Studio
+
+PROJECT SUMMARY Project name: App Distribution Website Purpose: Manage
+and publicly distribute multiple Android applications and their APK
+versions. Frontend hosting: GitHub Pages Frontend stack: React,
+TypeScript, Vite Backend: Firebase Cloud Functions (prefer 2nd
+generation where supported) Authentication: Firebase Authentication with
+Google Sign-in Database: Cloud Firestore File storage: Firebase Cloud
+Storage Deployment: GitHub Actions Interface language: English Design
+reference: Google Play-inspired, responsive, clean interface Theme:
+Light and Dark Default APK upload limit: 500 MB, configurable Public
+access: Anyone can browse and download published applications Admin
+access: One configured administrator only
+
+1.  PRODUCT GOALS
+
+2.  Manage multiple Android applications from one Admin Panel.
+
+3.  Support multiple versions for every application.
+
+4.  Allow the administrator to upload APKs from the web interface.
+
+5.  Extract and validate APK package/version metadata on a trusted
+    backend.
+
+6.  Automatically publish only after upload and validation succeed.
+
+7.  Keep the previous published version available if a new publication
+    fails.
+
+8.  Support restoring a previous version as the current version.
+
+9.  Provide public download URLs for published APKs.
+
+10. Track total, app-level, version-level, and daily download requests.
+
+11. Protect all administrative writes and privileged actions.
+
+12. Provide resumable uploads, actionable errors, retry and recovery
+    flows.
+
+13. Deploy the frontend automatically with GitHub Actions.
+
+14. FINALIZED PRODUCT DECISIONS
+
+-   Android APK distribution only in the initial release.
+-   Multiple apps and multiple versions per app.
+-   Public website requires no visitor account.
+-   Admin uses Google Sign-in.
+-   Only one administrator is supported initially.
+-   Admin email is a configurable placeholder and must be set during
+    deployment.
+-   Uploads are initiated through the Admin Panel.
+-   Publication is automatic after backend validation.
+-   Version metadata is extracted from the APK.
+-   App metadata and version metadata can both be edited.
+-   Mandatory update is configurable per app.
+-   Rollback restores a previous published version.
+-   If publishing fails, keep the previous version published.
+-   Firestore and Storage must expose only the intended public
+    read/download capabilities.
+-   APK validation runs on a trusted backend and includes
+    package/version checks, SHA-256, and digital-signature verification.
+-   Maximum APK size defaults to 500 MB and is configurable.
+-   Upload supports resumable transfer, progress, retry, cancel where
+    supported, validation status, and checksum display.
+-   App deletion supports archive and permanent delete with confirmation
+    and impact warning.
+-   Admin dashboard includes app counts, downloads, recent activity,
+    storage usage, and errors.
+-   Admin tools include featured ordering, visibility, maintenance mode,
+    and audit logs.
+-   Cost monitoring, usage alerts, backup, and recovery must be planned.
+
+3.  NON-GOALS FOR INITIAL RELEASE
+
+-   iOS distribution.
+-   Public user accounts.
+-   Reviews, ratings, or comments.
+-   Multiple administrators.
+-   Payments or subscriptions.
+-   App building/compilation.
+-   An independent native mobile administration app.
+
+4.  ARCHITECTURE The browser is untrusted. The backend is the authority
+    for all privileged actions.
+
+High-level flow: Public/Admin Browser -> GitHub Pages React frontend ->
+Firebase Authentication for Admin sign-in -> HTTPS Cloud Functions API
+-> Cloud Firestore for metadata, publication state, analytics, and audit
+logs -> Cloud Storage for staged APKs, published APKs, icons, and
+screenshots
+
+GitHub Pages serves static frontend assets only. It must not run backend
+code or contain service-account credentials. Cloud Functions must verify
+Firebase ID tokens and authorize every admin operation. Public API
+responses must expose only approved public fields.
+
+5.  TECHNOLOGY REQUIREMENTS Frontend:
+
+-   React + TypeScript + Vite.
+-   React Router for routing.
+-   Tailwind CSS or equivalent maintainable styling system.
+-   Firebase Web SDK for Authentication and resumable Storage upload
+    where permitted.
+-   Reusable typed components and feature modules.
+-   Centralized API client and error mapping.
+-   Responsive layout for mobile, tablet, and desktop.
+-   Accessible controls, keyboard navigation, focus states, and
+    appropriate contrast.
+-   Use a maintained charting library for Admin analytics.
+
+Backend: - Firebase Cloud Functions, preferably second generation where
+supported. - TypeScript and a supported Node.js runtime. - Firebase
+Admin SDK only in trusted backend code. - A maintained APK
+parsing/validation approach that can safely process APKs up to the
+configured size. - Least-privilege service-account permissions. -
+Secrets and deployment configuration stored in appropriate server-side
+configuration/secrets systems.
+
+6.  AUTHENTICATION AND ADMIN AUTHORIZATION 6.1 Sign-in
+
+-   Use Firebase Authentication with Google Sign-in.
+-   Admin routes require authentication.
+-   Unauthenticated users are redirected to the Admin login page.
+-   Unauthorized signed-in users receive an access-denied screen and
+    cannot invoke privileged APIs.
+-   Signing out clears the frontend authenticated state.
+-   Do not store passwords in Firestore.
+
+6.2 Administrator identity - Configure the permitted administrator email
+outside public frontend source. - Do not grant Admin access merely
+because a user can sign in with Google. - Verify the Firebase ID token
+on the backend. - Verify that the email is verified and matches the
+configured administrator identity. - Prefer a server-managed custom
+claim or equivalent trusted authorization record. - Never let the client
+grant itself an Admin claim. - If the Admin email is not configured, all
+administrative access must remain disabled. - Document the one-time
+secure bootstrap procedure for assigning the administrator claim. - When
+administrator identity changes, revoke the old identity’s privileges.
+
+6.3 Security - Reject expired, invalid, or missing ID tokens. - Apply
+rate limiting and abuse protection to authentication-sensitive
+endpoints. - Never ship service-account keys, private keys, or
+privileged secrets in frontend code or Git. - Restrict CORS to the
+deployed frontend origins where practical. - Validate all request
+bodies, IDs, strings, enums, and numeric limits. - Avoid logging tokens,
+credentials, or private data.
+
+7.  FIRESTORE DATA MODEL All authoritative timestamps must be generated
+    server-side. Public API responses must use explicit response DTOs
+    rather than returning internal documents wholesale.
+
+7.1 Collection: apps Document ID: generated application ID. Suggested
+fields: { “name”: “Example App”, “packageName”: “com.example.app”,
+“shortDescription”: “A short application description”, “description”:
+“Full application description”, “category”: “Utilities”, “tags”:
+[“utility”, “productivity”], “iconPath”: “app-assets/APP_ID/icon.png”,
+“screenshotPaths”: [“app-assets/APP_ID/screenshots/01.webp”],
+“latestPublishedVersionId”: “VERSION_ID”, “featured”: false,
+“featuredOrder”: 0, “visibility”: “public”, “status”: “published”,
+“mandatoryUpdate”: false, “minimumSupportedVersionCode”: null,
+“createdAt”: “server timestamp”, “updatedAt”: “server timestamp”,
+“archivedAt”: null } Rules: - Package name must be valid and unique
+across app records. - latestPublishedVersionId must point to a
+successfully published version. - Only published, public, non-archived
+apps appear in public listings. - Only backend code may change
+publication pointers and privileged fields. - Validate and sanitize all
+user-entered text. - Metadata editing must not overwrite verified APK
+identity.
+
+7.2 Subcollection: apps/{appId}/versions Suggested fields: {
+“versionName”: “1.2.0”, “versionCode”: 12, “releaseNotes”: “Bug fixes
+and performance improvements”, “apkPath”:
+“published/APP_ID/VERSION_ID/app.apk”, “apkSizeBytes”: 12345678,
+“sha256”: “HEX_CHECKSUM”, “signingCertificateSha256”:
+“CERTIFICATE_FINGERPRINT”, “status”: “published”, “isLatest”: true,
+“publishedAt”: “server timestamp”, “createdAt”: “server timestamp”,
+“createdBy”: “ADMIN_UID” } Rules: - Extract package name, version name,
+and version code from the actual APK. - The APK package name must match
+the parent app package name. - versionCode must be a valid integer and
+follow the configured version policy. - Reject duplicate version codes
+for the same app unless a documented recovery/restore operation is being
+performed. - Published APK binaries are immutable. - Rollback changes
+the current-version pointer; it does not rewrite the historical APK. -
+Only one version is the current published version for an app. - Failed
+or processing versions must not be publicly downloadable. - Keep
+historical versions until the Admin archives or deletes them.
+
+7.3 Collection: uploadSessions Suggested fields: { “appId”: “APP_ID”,
+“versionId”: “VERSION_ID”, “status”: “uploading”, “originalFileName”:
+“app.apk”, “expectedSizeBytes”: 12345678, “uploadPath”:
+“staging/SESSION_ID/app.apk”, “uploadedAt”: null, “validationStartedAt”:
+null, “validatedAt”: null, “errorCode”: null, “createdAt”: “server
+timestamp” } Allowed states: created, uploading, uploaded, validating,
+validated, publishing, published, failed, cancelled. - Enforce state
+transitions on the backend. - Never trust client-supplied status
+values. - Expire abandoned sessions and clean staging files through a
+scheduled cleanup process. - Do not publish an incomplete upload.
+
+7.4 Collection: downloadEvents Suggested fields: { “appId”: “APP_ID”,
+“versionId”: “VERSION_ID”, “eventType”: “download_url_issued”,
+“createdAt”: “server timestamp”, “requestId”: “UNIQUE_REQUEST_ID” } -
+Clients cannot write events directly. - Backend validates public
+availability before issuing a URL. - Use idempotency where practical. -
+Minimize personal data and apply retention rules. - Be honest in the UI:
+URL issuance/request count is not guaranteed proof that the complete
+file was saved on a user’s device.
+
+7.5 Collection: downloadStats Use daily aggregate documents keyed by
+date, app ID, and version ID. Suggested fields: { “date”: “YYYY-MM-DD”,
+“appId”: “APP_ID”, “versionId”: “VERSION_ID”, “requestCount”: 25,
+“updatedAt”: “server timestamp” } - Track total, per-app, per-version,
+and daily request metrics. - Use transactions or atomic increments. -
+Use sharded counters or another scalable design if request volume
+requires it. - Define the analytics metric as a server-observed download
+request or URL issuance unless actual transfer completion can be
+reliably observed. - Avoid double counting retries when the same request
+ID is reused.
+
+7.6 Collection: auditLogs Suggested fields: { “actorUid”: “ADMIN_UID”,
+“action”: “version.published”, “appId”: “APP_ID”, “versionId”:
+“VERSION_ID”, “createdAt”: “server timestamp”, “requestId”:
+“REQUEST_ID”, “result”: “success” } Log app creation, metadata edits,
+uploads, validation results, publication, rollback, archive, permanent
+deletion, mandatory-update changes, and maintenance-mode changes. -
+Audit logs are append-only from the application’s perspective. - Never
+log secrets, tokens, or file contents.
+
+7.7 Collection: systemConfig Use only for non-secret operational
+settings, such as maintenance mode, configurable upload limit, and safe
+public configuration. Privileged values must be server-controlled. Do
+not store secrets in a publicly readable document. The configured Admin
+email and privileged deployment settings must be stored in a trusted
+server-side configuration/secret mechanism, not exposed through public
+API responses.
+
+8.  FIRESTORE SECURITY RULES Implement default-deny Firestore rules.
+
+Principles: - Deny all client writes to apps, versions, uploadSessions,
+downloadEvents, downloadStats, auditLogs, and privileged system
+configuration unless a specific safe public read is explicitly
+required. - Public clients must never be allowed to create or edit app
+metadata, version state, counters, upload status, audit logs, or
+administrator configuration. - Public reads should normally go through
+Cloud Functions so that only published/public fields are exposed. - If
+direct public Firestore reads are enabled for specific published
+records, rules must restrict reads to public, published, non-archived
+data and must not expose internal fields. - Admin UI must use
+authenticated HTTPS functions for mutations. - Remember: Firebase Admin
+SDK in Cloud Functions bypasses Firestore Security Rules. Every function
+must independently verify authorization and validate inputs. - Add
+automated rules tests for unauthenticated, ordinary authenticated,
+authorized Admin, and malformed requests.
+
+A conceptual default-deny baseline:
+
+rules_version = ‘2’; service cloud.firestore { match
+/databases/{database}/documents { match /{document=**} { allow read,
+write: if false; } } }
+
+Add only narrowly scoped public read rules if the chosen implementation
+truly requires direct browser reads. Do not weaken the default-deny
+policy for convenience.
+
+9.  CLOUD STORAGE DESIGN AND ACCESS 9.1 Storage paths
+
+-   Staging APKs: staging/{sessionId}/app.apk
+-   Published APKs: published/{appId}/{versionId}/app.apk
+-   App icon: app-assets/{appId}/icon.{ext}
+-   Screenshots: app-assets/{appId}/screenshots/{assetId}.{ext}
+
+Use generated IDs rather than trusting uploaded filenames as object
+paths.
+
+9.2 Upload access - Admin-only upload initiation. - Validate the
+configured Admin identity on upload-session creation and finalization. -
+Enforce maximum size on the client for UX and on the backend for
+security. - Use resumable uploads and report progress. - Upload into a
+staging path, never directly into a public published path. - A
+successful browser upload is not equivalent to successful validation or
+publication. - Reject unexpected content types and inspect the actual
+file content. - Clean up abandoned staging objects.
+
+9.3 Public download access - Only published APK objects should be
+downloadable. - Public download URLs may be shared; that is expected for
+public distribution. - Do not treat an obscure URL as an authorization
+control. - Do not expose staging object URLs. - Use backend publication
+state to decide whether a download URL can be issued. - If Firebase
+download-token URLs are used, treat them as bearer links: anyone
+possessing a valid public link may share it. Rotate/revoke tokens when
+necessary and document the trade-off. - A URL issued before an app is
+unpublished may continue to work if it is a bearer download-token URL.
+If immediate revocation is required, use a backend-mediated download
+design instead. The initial product requirement is public URLs, so
+document this limitation. - Do not claim that changing Firestore
+metadata alone revokes an already issued Storage download-token URL.
+
+9.4 Storage Rules - Default-deny all writes from public users. - Do not
+allow public writes to any Storage path. - Do not permit direct upload
+to published paths from the browser. - Public reads must be restricted
+to the chosen published-file strategy. - Use Cloud Functions to control
+publication and download URL issuance. - Ensure Storage Rules and
+Firestore publication state cannot be bypassed by an ordinary user. -
+Test rules in the Firebase Emulator Suite.
+
+10. APK UPLOAD AND VALIDATION WORKFLOW The required workflow is:
+11. Admin signs in with Google.
+12. Backend authorizes the configured Admin identity.
+13. Admin selects an existing app or creates a new app record.
+14. Admin selects an APK file.
+15. Frontend performs preliminary UX checks: extension, apparent size,
+    and required metadata.
+16. Frontend requests an upload session from Cloud Functions.
+17. Backend validates the request and creates a staging path.
+18. Frontend uploads using resumable Firebase Storage upload.
+19. Show progress, cancel where supported, retry, and resume behavior.
+20. Once upload finishes, frontend calls a backend finalization
+    endpoint.
+21. Backend verifies object existence, size, and upload session
+    ownership.
+22. Backend processes the APK in a trusted environment.
+23. Backend verifies APK structure and parses package name, versionName,
+    and versionCode.
+24. Backend checks that the package name matches the target app.
+25. Backend enforces version-code policy and duplicate detection.
+26. Backend computes SHA-256.
+27. Backend verifies APK digital signature and extracts
+    signing-certificate fingerprint.
+28. Backend checks that the APK is structurally valid and within
+    configured limits.
+29. Backend records validation results.
+30. If validation succeeds, the backend safely publishes the new
+    version.
+31. If publication succeeds, update latestPublishedVersionId and version
+    status atomically or through a recoverable publication state
+    machine.
+32. If any step fails, do not expose the new version publicly.
+33. Preserve the previous published version.
+34. Display a clear success or failure result in the Admin Panel.
+
+10.1 Important validation rules - The .apk filename extension alone is
+insufficient. - Check actual APK/ZIP structure and parse required
+Android metadata. - Do not trust client-supplied package name, version,
+size, checksum, or signature status. - Compute SHA-256 on the trusted
+backend. - Verify APK signing certificate and signature using a
+maintained Android/APK verification tool. - If the signing certificate
+differs from the app’s expected certificate, reject by default or
+require an explicit, audited Admin recovery workflow. - APK signature
+verification proves integrity/signing identity, not that the app is
+harmless. - Do not execute uploaded APKs during validation. - Apply
+processing timeouts, resource limits, and safe temporary-file cleanup. -
+Configure the backend to support the selected maximum upload size. If a
+function’s execution or memory limits make processing a 500 MB APK
+impractical, use a compatible Cloud Run worker or another supported
+processing architecture without changing the frontend contract. -
+Validate icons and screenshots separately; restrict their file types and
+dimensions. - Store validation outcomes and stable error codes.
+
+10.2 Auto-publish rules Auto-publish is allowed only when: - Upload is
+complete. - Actual object size is within the configured limit. - APK
+parsing succeeds. - Package name matches the application. - Version
+metadata passes policy. - SHA-256 calculation succeeds. - Signature
+verification succeeds. - Required metadata is valid. - The publication
+transaction succeeds.
+
+The latest-version pointer must not change before all required checks
+pass.
+
+11. VERSION MANAGEMENT AND PUBLISHING 11.1 Version data
+
+-   Extract versionName and versionCode from the APK.
+-   Preserve both values.
+-   Use versionCode for Android version ordering and validation.
+-   Version name is display metadata and must not be treated as a
+    reliable numeric ordering key.
+-   Prevent accidental duplicate version codes for the same application.
+-   Keep old version files and metadata unless explicitly archived or
+    deleted.
+
+11.2 Publication state Use explicit states such as: draft, uploading,
+validating, validated, publishing, published, failed, archived.
+
+Only published versions are eligible for public download.
+
+11.3 Safe publication - Store the APK under a unique, immutable version
+path. - Validate the file before changing public metadata. - Use a
+Firestore transaction or recoverable publication workflow to update the
+app’s latestPublishedVersionId and version states. - Avoid any state
+where the app points to a missing or unvalidated object. - If the
+publication transaction fails, leave the previous latest pointer
+intact. - Use idempotent finalization so retries do not create duplicate
+publications. - Record the publication result in audit logs.
+
+11.4 Rollback - Admin selects a previously published version. - Backend
+verifies that the version still exists, is valid, and belongs to the
+app. - Backend restores that version as the latest published version. -
+Preserve all historical version records. - Update latest-version
+metadata consistently. - Record the rollback in audit logs. - Do not
+re-upload the binary unless the original file is unavailable and the
+Admin intentionally re-uploads it.
+
+11.5 Mandatory updates - Provide an app-level mandatoryUpdate toggle. -
+Provide a minimumSupportedVersionCode field if needed by the public UI
+or application integration. - Clearly explain that a website-side
+mandatory-update flag only affects website messaging unless the
+distributed Android app itself implements an update-check mechanism. -
+Do not imply that the website can force an already installed APK to
+update by itself. - If mandatoryUpdate is enabled, show a clear update
+notice on the app details page and prominently link to the latest
+published APK. - Do not block ordinary website browsing.
+
+12. APPLICATION METADATA MANAGEMENT Admin can create and edit
+    application metadata:
+
+-   App name.
+-   Android package name.
+-   Short description.
+-   Full description.
+-   Icon.
+-   Multiple screenshots.
+-   Category.
+-   Tags.
+-   Featured status and order.
+-   Public/unpublished visibility.
+-   Mandatory-update setting.
+-   Release notes for each version.
+
+System-generated or verified fields: - APK size in bytes. - SHA-256
+checksum. - Version name and code extracted from APK. - Signing
+certificate fingerprint. - Creation and publication timestamps.
+
+Rules: - Validate all fields on the backend. - Enforce package-name
+uniqueness. - Enforce reasonable text-length limits. - Sanitize text
+rendered on the public website. - Never allow a metadata edit to falsely
+mark an unvalidated file as published. - Changes to app metadata must be
+audited. - Store image assets separately from APK files. - Show clear
+validation errors next to the relevant fields.
+
+13. PUBLIC WEBSITE UI/UX 13.1 Design
+
+-   Google Play-inspired app directory, not a pixel-perfect copy.
+-   Clean, modern, polished interface.
+-   English UI.
+-   Responsive mobile-first layout.
+-   Light and Dark themes with a visible toggle.
+-   Persist theme preference locally where appropriate.
+-   Accessible contrast, focus indicators, labels, and keyboard
+    navigation.
+-   Use loading skeletons, empty states, and friendly error states.
+
+13.2 Homepage Include: - Header with website name/logo. - Search bar. -
+Category navigation or filter. - Featured applications where
+configured. - App grid/cards. - Sorting/filtering controls where
+implemented. - Footer.
+
+The primary homepage emphasis is all apps displayed in a searchable
+grid.
+
+13.3 App cards Each card should show: - App icon. - App name. - Short
+description where space allows. - Latest version. - Last updated date. -
+Download count when available. - Category. - Link to the app details
+page.
+
+Cards must be responsive and usable on narrow mobile screens.
+
+13.4 App details page Display: - App icon and name. - Developer label or
+site identity where applicable. - Description and feature information. -
+Screenshots/gallery. - Latest version name and code. - APK size. - Last
+updated date. - Release notes. - Download button. - Download
+progress/status feedback where technically observable. - Download
+count. - Historical versions list. - Mandatory-update notice when
+enabled.
+
+Only published versions may appear as downloadable versions. Archived or
+failed versions must not be shown as public download options.
+
+13.5 Search and categories - Search by app name and supported
+metadata. - Category filters. - Empty search results state. -
+Clear/reset filter option. - Sort by newest update, name, or popularity
+if those controls are implemented. - Search must not reveal unpublished
+apps.
+
+13.6 Version history - Show published historical versions. - Display
+version name, version code, release date, APK size, and release notes
+where available. - Each downloadable historical version must pass the
+same public-availability check as the latest version. - Never expose
+staging or failed upload objects.
+
+13.7 Footer Include: - About. - Contact information or a configurable
+contact link. - Privacy Policy. - Terms of Use. - Copyright and website
+name.
+
+Do not invent contact details. Provide configurable placeholders until
+the owner supplies them.
+
+13.8 PWA and progress PWA installation was not explicitly selected as a
+required feature. Do not treat PWA as a launch blocker. It may be added
+later. Browser download progress can only be shown when the chosen
+download mechanism exposes meaningful progress information. For a direct
+browser navigation to a public Storage URL, the website may only be able
+to show a starting/loading state, not reliable byte-level progress. Do
+not fake progress percentages.
+
+14. ADMIN PANEL UI/UX 14.1 Navigation Provide:
+
+-   Dashboard.
+-   Applications.
+-   Upload APK.
+-   Versions.
+-   Analytics.
+-   Storage/usage.
+-   Activity log.
+-   Settings.
+-   Maintenance mode control.
+
+14.2 Dashboard widgets - Total applications. - Published applications. -
+Total download requests. - Daily download chart. - Recent
+uploads/publications. - Storage usage where the platform exposes
+reliable metrics. - Recent errors. - Quick action to add an app or
+upload a new version.
+
+14.3 Application management - List apps with search and filters. -
+Create app. - Edit app metadata. - View versions. - Toggle public
+visibility. - Feature/unfeature and reorder. - Archive and restore. -
+Permanently delete only after confirmation and impact warning.
+
+14.4 Upload interface Advanced upload UI must include: - Drag-and-drop
+area. - File picker. - Selected filename and file size. - Configurable
+maximum-size notice. - Progress bar for upload transfer. - Cancel where
+supported. - Retry/resume for supported resumable uploads. - Current
+upload state. - Backend validation status. - Package name and version
+extracted from APK. - SHA-256 display. - Signature verification
+status. - Error code and actionable recovery guidance. - Clear
+distinction between Upload Complete, Validation Complete, and Published.
+
+14.5 Metadata editor - App-level metadata editor. - Version-level
+release notes editor. - Read-only verified APK identity fields where
+appropriate. - Field-level validation. - Save feedback. - Confirmation
+for destructive changes.
+
+14.6 Analytics Display: - Total download requests. - Per-app request
+totals. - Per-version request totals. - Daily trend chart. - Date range
+filter where practical. - Clear metric definitions explaining that URL
+issuance/request counts do not guarantee successful file saving on the
+device.
+
+14.7 Activity log Show: - Timestamp. - Action. - App/version affected. -
+Outcome. - Request ID or safe reference. Do not display secrets or
+authentication tokens.
+
+15. APPLICATION DELETION AND ARCHIVING 15.1 Archive
+
+-   Archive hides the app from public listings.
+-   Archived apps and versions remain in the database.
+-   Existing public download-token URLs may continue to work until
+    revoked or otherwise invalidated.
+-   Archive operation must be audited.
+-   Admin can restore an archived app.
+
+15.2 Permanent deletion - Require an explicit confirmation dialog. -
+Show an impact warning listing the app and its versions/assets. -
+Prevent accidental deletion of the active latest version without a safe
+unpublish/replace operation. - Delete or schedule deletion of related
+Storage objects and Firestore records in a controlled backend
+workflow. - Handle partial deletion and retry safely. - Record the
+deletion result in audit logs where retention policy allows. - Do not
+claim deletion succeeded until the backend confirms it. - Consider a
+short recoverable deletion queue as an operational safety measure even
+though permanent deletion is supported.
+
+16. FIREBASE CLOUD FUNCTIONS API CONTRACT Use HTTPS callable functions
+    or HTTP endpoints consistently. If using HTTP endpoints, define CORS
+    and authentication explicitly. Every protected endpoint must verify
+    the Firebase ID token and administrator authorization.
+
+Suggested endpoints/function names:
+
+PUBLIC - listPublicApps Input: search, category, sort, page/cursor.
+Output: public app summaries only.
+
+-   getPublicAppDetails Input: appId. Output: public metadata and latest
+    published version details.
+
+-   listPublicVersions Input: appId. Output: published version history
+    only.
+
+-   createDownloadRequest Input: appId, versionId, idempotencyKey.
+    Output: approved download URL and request reference. Behavior:
+    verify app/version public status, issue URL, record request event,
+    update aggregate counters safely.
+
+ADMIN - getAdminDashboard Output: app counts, download aggregates,
+recent activity, usage and errors.
+
+-   createApp Input: validated app metadata. Output: created app ID.
+
+-   updateApp Input: appId and permitted metadata fields. Output:
+    updated public/admin-safe app record.
+
+-   createUploadSession Input: appId, original filename, expected size.
+    Output: upload session ID and authorized staging upload details.
+
+-   finalizeUpload Input: uploadSessionId. Output: processing status;
+    must be idempotent.
+
+-   getUploadStatus Input: uploadSessionId. Output: current state,
+    validation results, safe error information.
+
+-   updateVersionReleaseNotes Input: appId, versionId, release notes.
+    Output: updated metadata.
+
+-   publishValidatedVersion Internal or protected operation invoked only
+    after validation. Output: publication result.
+
+-   rollbackVersion Input: appId, targetVersionId. Output: restored
+    latest version information.
+
+-   archiveApp / restoreApp Input: appId. Output: resulting status.
+
+-   deleteApp Input: appId and explicit confirmation token/intent.
+    Output: deletion job/status.
+
+-   setFeaturedOrder Input: appId, featured state, order. Output:
+    updated result.
+
+-   setVisibility Input: appId and visibility. Output: updated result.
+
+-   setMandatoryUpdate Input: appId, enabled state, optional minimum
+    supported version code. Output: updated result.
+
+-   setMaintenanceMode Input: enabled state and optional maintenance
+    message. Output: updated configuration.
+
+-   getAnalytics Input: date range and optional app/version filters.
+    Output: aggregate analytics.
+
+-   getStorageUsage Output: best available usage data and quota/budget
+    warnings.
+
+-   listAuditLogs Input: pagination and optional filters. Output: safe
+    audit records.
+
+API rules: - Validate request schema on every endpoint. - Apply
+authorization and rate limits. - Use stable error codes. - Use
+idempotency for operations that may be retried. - Avoid returning
+internal Storage paths or sensitive configuration unless required by the
+authenticated Admin UI. - Do not trust client-provided actor UID,
+status, timestamps, checksum, validation result, or publication pointer.
+
+17. DOWNLOAD URL AND ANALYTICS SEMANTICS
+
+-   Public download links are intentionally shareable.
+-   Backend checks that the app and version are published before issuing
+    a URL.
+-   Count a server-observed download request or URL issuance.
+-   Do not label this metric “confirmed completed downloads” unless the
+    chosen delivery path can reliably verify complete transfer.
+-   If direct Firebase Storage download-token URLs are used, understand
+    that previously issued links may remain usable even after the app is
+    unpublished.
+-   If strict revocation is required in a future release, migrate to a
+    backend-mediated or otherwise revocable delivery architecture.
+-   Rate-limit request creation to reduce abuse.
+-   Use idempotency keys to reduce accidental duplicate counts.
+-   Avoid collecting device fingerprints or unnecessary personal data.
+
+18. MANDATORY UPDATE BEHAVIOR
+
+-   Admin can enable/disable mandatory update per app.
+-   When enabled, public details page shows a prominent update-required
+    notice and latest download action.
+-   Version history may remain visible according to the product policy.
+-   The website does not control already installed apps.
+-   To enforce mandatory updates inside an installed Android app, that
+    app must implement its own version-check and update-handling logic.
+-   Do not represent the website flag as an OS-level update enforcement
+    mechanism.
+
+19. ERROR HANDLING AND RECOVERY All error messages must be
+    understandable to the Admin or visitor, with an appropriate next
+    action. Never expose stack traces, tokens, secrets, or internal
+    infrastructure details to public users.
+
+19.1 Authentication errors - Popup closed by user: return to login
+without a scary error. - Unauthorized email: show access denied. -
+Expired token: request re-authentication. - Firebase unavailable: show
+retry option.
+
+19.2 Upload errors - File too large: show configured limit. - Invalid
+extension or content: reject. - Network failure: retain session state
+and offer resumable retry where supported. - Incomplete upload: do not
+validate or publish. - Missing uploaded object: allow retry or restart
+session. - Duplicate version code: reject with a clear explanation. -
+Package mismatch: reject and identify expected versus actual package
+where safe. - Signature verification failure: reject and explain that
+the APK could not be verified. - Checksum failure: reject and allow a
+controlled retry. - Backend timeout: show processing status and allow
+status polling; do not create duplicate versions. - Storage quota/budget
+issue: alert the Admin and block new uploads when configured limits are
+reached.
+
+19.3 Publication errors - Preserve the previous latest published
+version. - Mark the new version/session failed or recoverable. - Record
+a stable error code. - Allow safe retry where the operation is
+idempotent. - Do not show a failed version publicly. - Repair
+inconsistent publication state through a backend recovery job.
+
+19.4 Download errors - App not found or unpublished: show a
+not-found/unavailable state. - Version unavailable: show a clear error
+and link to the current version when appropriate. - URL generation
+failure: provide retry. - Network failure: explain that the user can
+retry. - Never expose staging paths.
+
+19.5 Database and Storage failures - Handle permission-denied,
+unavailable, timeout, and resource-exhausted errors. - Use bounded
+exponential backoff for retryable transient errors. - Do not retry
+permanent validation or authorization failures automatically. - Log
+diagnostic details server-side without sensitive information. - Preserve
+data consistency across retries.
+
+19.6 Recovery policy - Automatically retry only safe, transient,
+idempotent operations. - Use bounded retry attempts and exponential
+backoff. - For ambiguous operations, query current state before
+retrying. - Provide manual retry for unresolved failures. - Alert the
+Admin on repeated failures or quota problems.
+
+20. RATE LIMITING AND ABUSE PROTECTION Apply appropriate rate limiting
+    to:
+
+-   Login-sensitive endpoints.
+-   Upload-session creation.
+-   Upload finalization.
+-   Publication and rollback.
+-   Download URL issuance.
+-   Metadata mutation.
+-   Delete operations.
+
+Use a suitable combination of Firebase App Check where compatible,
+backend rate limits, request validation, and abuse monitoring. App Check
+is an additional signal, not a substitute for administrator
+authorization.
+
+Protect against: - Public writes. - Forged metadata. - Repeated
+upload-session creation. - Excessive download URL issuance. - Duplicate
+analytics events. - Oversized uploads. - Malformed APKs. - Resource
+exhaustion during APK parsing. - Untrusted file names and paths.
+
+21. STORAGE QUOTA AND COST CONTROL
+
+-   Make the default 500 MB maximum upload size configurable.
+-   Monitor available Storage and backend usage metrics.
+-   Configure budget alerts where supported by the billing platform.
+-   Do not assume budget alerts automatically stop billing or enforce
+    hard quotas.
+-   Use application-level checks to stop new uploads when configured
+    usage thresholds are reached.
+-   Preserve existing published files if new uploads are blocked.
+-   Display clear storage/quota warnings in the Admin Panel.
+-   Estimate and document costs for storage, download bandwidth/egress,
+    Cloud Functions, Firestore operations, and logs.
+-   Review current Firebase plan, bucket requirements, region, and
+    pricing before production launch.
+-   Do not promise that the whole platform can remain within a free tier
+    when APK sizes and download traffic are unknown.
+
+22. BACKUP AND DISASTER RECOVERY
+
+-   Establish a documented backup policy for Firestore metadata and
+    important configuration.
+-   Evaluate scheduled Firestore exports to a protected backup
+    destination.
+-   Maintain a recoverable record of app metadata, version metadata,
+    publication pointers, and audit information.
+-   Define whether APK binaries are protected through object versioning,
+    a secondary backup copy, or another supported mechanism.
+-   Do not assume Firestore backups automatically include Cloud Storage
+    APK objects.
+-   Test restore procedures in a non-production environment.
+-   Document recovery steps for accidental deletion, failed publication,
+    corrupted metadata, and service configuration errors.
+-   Store backups with appropriate access restrictions and retention.
+-   Monitor backup job success/failure.
+-   Provide an Admin-visible recovery status or operational
+    documentation.
+-   Define retention and recovery-point expectations before production
+    release.
+
+23. MAINTENANCE MODE
+
+-   Admin can enable or disable maintenance mode.
+-   Public site should display a configurable maintenance notice while
+    enabled.
+-   Read-only public app browsing may either remain available or be
+    disabled according to the selected implementation; document the
+    behavior.
+-   Administrative recovery access must remain available to the
+    authorized Admin.
+-   Maintenance mode must not bypass authorization or expose unpublished
+    data.
+-   Record maintenance changes in audit logs.
+
+24. GITHUB ACTIONS DEPLOYMENT 24.1 Frontend deployment
+
+-   Store source code in a GitHub repository.
+-   Configure GitHub Pages as the static hosting target.
+-   Use GitHub Actions to install dependencies, run type checks,
+    linting, tests, build, and deploy.
+-   Pin or appropriately constrain dependency versions.
+-   Build using the configured Vite base path for the GitHub Pages
+    repository URL.
+-   If using React Router, configure a compatible GitHub Pages routing
+    strategy, such as hash routing or a verified fallback approach.
+-   Do not assume clean history-based routes will work on GitHub Pages
+    without a fallback configuration.
+-   Use repository secrets or environment variables only for values that
+    must not be public.
+-   Remember that Firebase client configuration used by a web app is not
+    a server secret; security must come from Firebase Rules and backend
+    authorization.
+-   Never place service-account credentials in GitHub Pages assets.
+-   Protect the deployment branch and review workflow permissions.
+-   Use the minimum required GitHub Actions permissions.
+
+24.2 Backend deployment - Deploy Cloud Functions and Firebase
+rules/indexes through a controlled, documented process. - Keep backend
+deployment separate from static frontend deployment where appropriate. -
+Use a secure authentication mechanism for CI deployment, preferably
+short-lived credentials or workload identity federation where
+supported. - Never store long-lived privileged keys in the repository. -
+Validate required environment configuration before deployment. - Use
+separate Firebase projects for development/test and production where
+feasible.
+
+24.3 Deployment acceptance - A successful commit to the designated
+branch triggers frontend build and deployment. - Build or test failures
+prevent deployment. - The deployed site loads correctly on the GitHub
+Pages URL. - Firebase API calls use the correct environment
+configuration. - Direct navigation and refresh work for all supported
+routes. - No secrets appear in generated frontend assets.
+
+25. ENVIRONMENT CONFIGURATION Provide a documented example configuration
+    file without secrets.
+
+Frontend configuration examples: - VITE_FIREBASE_API_KEY -
+VITE_FIREBASE_AUTH_DOMAIN - VITE_FIREBASE_PROJECT_ID -
+VITE_FIREBASE_STORAGE_BUCKET - VITE_FIREBASE_MESSAGING_SENDER_ID -
+VITE_FIREBASE_APP_ID - VITE_API_BASE_URL
+
+Use the exact configuration values supplied by the Firebase project.
+These frontend values are not a replacement for security rules.
+
+Trusted backend configuration examples: - ADMIN_EMAIL -
+FIREBASE_PROJECT_ID - MAX_APK_SIZE_BYTES - ALLOWED_FRONTEND_ORIGINS -
+MAINTENANCE_DEFAULT - UPLOAD_SESSION_TTL - RATE_LIMIT_POLICY -
+BACKUP_CONFIGURATION
+
+Do not expose privileged server configuration in public API responses.
+Do not commit secret files.
+
+26. REQUIRED PAGES AND ROUTES Public:
+
+-   /
+-   /apps/:appId
+-   /categories/:category
+-   /versions/:appId where appropriate
+-   /privacy
+-   /terms
+-   /about
+-   /contact
+
+Admin: - /admin/login - /admin - /admin/apps - /admin/apps/new -
+/admin/apps/:appId - /admin/apps/:appId/edit -
+/admin/apps/:appId/upload - /admin/apps/:appId/versions -
+/admin/analytics - /admin/storage - /admin/activity - /admin/settings
+
+Implement routing compatible with GitHub Pages. Route names may be
+adjusted during implementation if needed, but the page functionality
+must remain available.
+
+27. TESTING REQUIREMENTS 27.1 Unit tests Test:
+
+-   Input validation.
+-   Package-name validation.
+-   Version-code policy.
+-   Metadata sanitization.
+-   Publication state transitions.
+-   Idempotency.
+-   Download counter aggregation.
+-   Rate-limit decisions.
+-   Error mapping.
+
+27.2 Firebase Emulator tests Test: - Firestore default-deny behavior. -
+Storage write restrictions. - Public read restrictions. -
+Unauthenticated API requests. - Ordinary authenticated user attempts to
+perform Admin actions. - Authorized Admin operations. - Attempts to
+forge Admin status. - Attempts to write analytics directly. - Attempts
+to access staging files. - Attempts to publish invalid versions.
+
+27.3 Integration tests Test: - Google Sign-in. - Admin authorization. -
+Create/edit/archive app. - Upload a valid APK. - Upload an invalid or
+malformed APK. - File too large. - Package mismatch. - Duplicate version
+code. - Checksum verification. - Signature verification. - Successful
+automatic publication. - Failed publication preserving the previous
+version. - Rollback. - Public download URL issuance. - Analytics
+aggregation. - Storage quota block. - Resumable upload recovery. -
+Permanent deletion confirmation and partial-failure recovery.
+
+27.4 UI tests Test: - Mobile, tablet, and desktop layouts. - Light/Dark
+themes. - Search and category filtering. - App details and
+screenshots. - Version history. - Download error states. - Admin forms
+and field-level errors. - Upload progress and retry. -
+Empty/loading/error states. - Keyboard accessibility and focus
+management.
+
+27.5 Security tests - No public write access. - No unauthorized Admin
+API access. - No secret exposure in frontend build. - No ability to
+modify publication pointers from the client. - No ability to bypass APK
+validation. - No access to unpublished versions through public
+endpoints. - No unsafe path or filename handling. - No uncontrolled
+retry loop or resource-exhaustion vulnerability.
+
+28. ACCEPTANCE CRITERIA The project is acceptable only when all
+    applicable criteria below pass.
+
+A. Public website 1. Visitors can browse published applications without
+signing in. 2. Search and category filtering work. 3. App cards and
+detail pages show the required metadata. 4. Screenshots and icons load
+correctly. 5. Published APKs can be downloaded using public links. 6.
+Historical published versions can be accessed when available. 7. Light
+and Dark themes work on mobile and desktop. 8. Footer links and policy
+pages exist. 9. Unpublished, failed, or archived apps are not exposed
+through normal public listings.
+
+B. Admin authentication 10. Google Sign-in works. 11. Only the
+configured Admin can perform privileged operations. 12. An unconfigured
+Admin email leaves privileged access disabled. 13. Public users cannot
+write app metadata or analytics.
+
+C. Upload and validation 14. Admin can upload an APK from the Admin
+Panel. 15. The configured file-size limit is enforced. 16. Resumable
+upload and retry work where supported. 17. APK package name and version
+data are extracted by the backend. 18. SHA-256 is calculated by the
+backend. 19. Digital-signature verification is performed. 20. Invalid,
+malformed, oversized, mismatched, or unverified APKs are rejected. 21.
+Incomplete uploads cannot be published.
+
+D. Publishing and versioning 22. A validated APK is automatically
+published. 23. The new version becomes latest only after successful
+publication. 24. A failed publication leaves the previous version
+available. 25. Rollback restores a previous published version. 26.
+Historical versions remain available until archived/deleted according to
+policy. 27. Mandatory update can be configured per app.
+
+E. Analytics and administration 28. Dashboard displays app totals,
+download metrics, recent activity, usage, and errors. 29. Analytics
+provide total, per-app, per-version, and daily request counts. 30. Admin
+can edit app and version metadata. 31. Admin can feature, reorder, hide,
+archive, restore, and permanently delete apps with confirmation. 32.
+Important actions appear in audit logs. 33. Quota alerts and upload
+blocking work as configured.
+
+F. Reliability and deployment 34. Transient errors can be retried
+safely. 35. Duplicate retries do not create duplicate publication
+records or unintended double counts. 36. Backup and recovery procedures
+are documented and tested. 37. GitHub Actions builds and deploys the
+frontend. 38. Failed builds/tests prevent deployment. 39. No privileged
+secrets are exposed in frontend assets. 40. Supported routes work
+correctly on GitHub Pages.
+
+29. IMPLEMENTATION PHASES Phase 1 — Foundation
+
+-   Create project structure.
+-   Configure React, TypeScript, Vite, routing, design system, and
+    Firebase client.
+-   Set up development and production environments.
+
+Phase 2 — Public UI - Build homepage, cards, search, categories,
+details, version history, themes, and footer. - Connect read-only public
+API.
+
+Phase 3 — Authentication and Admin shell - Implement Google Sign-in. -
+Implement trusted Admin authorization. - Build protected dashboard and
+navigation.
+
+Phase 4 — Application metadata - Implement app creation, editing,
+categories, icons, screenshots, featured order, and visibility.
+
+Phase 5 — Upload pipeline - Implement upload sessions, resumable
+transfer, progress, backend APK parsing, checksum, signature
+verification, and validation errors.
+
+Phase 6 — Publishing and version management - Implement
+auto-publication, immutable version objects, rollback, archive,
+deletion, and mandatory-update settings.
+
+Phase 7 — Analytics and operations - Implement counters, daily reports,
+audit logs, usage warnings, rate limiting, maintenance mode, and
+recovery jobs.
+
+Phase 8 — Security and QA - Run emulator, unit, integration, UI, and
+security tests. - Verify Firebase Rules and Storage access. - Test
+failure recovery.
+
+Phase 9 — Deployment - Configure GitHub Actions. - Deploy frontend to
+GitHub Pages. - Deploy backend, rules, and indexes to Firebase. - Verify
+production configuration and smoke tests.
+
+30. GOOGLE AI STUDIO IMPLEMENTATION INSTRUCTIONS Use this PRD as the
+    source of truth.
+
+Implementation rules: 1. Build a complete working application, not just
+a static UI mockup. 2. Keep frontend, backend functions, shared types,
+Firebase rules, indexes, and tests in a clear project structure. 3. Use
+TypeScript types for application records, version records, upload
+sessions, API requests, and API responses. 4. Implement the public
+interface and protected Admin Panel as separate feature areas. 5. Use
+Firebase Authentication for Google Sign-in. 6. Use Cloud Functions as
+the trusted backend for privileged actions and APK validation. 7. Use
+Cloud Firestore for metadata, version state, analytics aggregates, and
+audit logs. 8. Use Cloud Storage for staged APKs, published APKs, icons,
+and screenshots. 9. Never trust client-provided Admin status, checksum,
+package identity, version identity, publication state, or timestamps.
+10. Implement default-deny security rules and add only narrowly scoped
+permissions. 11. Do not place service-account keys or privileged secrets
+in frontend code. 12. Implement the upload state machine and idempotent
+publication flow. 13. Preserve the previous published version if any new
+publication fails. 14. Provide stable error codes and user-friendly
+messages. 15. Add tests for security rules, backend authorization,
+upload validation, publishing, rollback, and analytics. 16. Provide a
+README with setup instructions, Firebase configuration, GitHub Pages
+deployment, backend deployment, environment variables, and
+troubleshooting. 17. Provide sample environment files containing
+placeholders only. 18. If a required cloud resource or credential is not
+available, create the correct integration code and clearly document the
+configuration step. Do not fabricate successful deployment or pretend
+that external services have been configured. 19. Do not silently replace
+Firebase or GitHub Pages with unrelated services. 20. Do not claim that
+the website can force installed Android applications to update unless
+the Android applications themselves implement update-check logic.
+
+31. REQUIRED DELIVERABLES The implementation should produce:
+
+-   Complete React + TypeScript frontend.
+-   Responsive public website.
+-   Protected Admin Panel.
+-   Firebase Authentication integration.
+-   Cloud Functions backend.
+-   Firestore schema and indexes.
+-   Firestore Security Rules.
+-   Cloud Storage Security Rules.
+-   APK validation and publication workflow.
+-   Download analytics.
+-   Audit logging.
+-   Upload and publication recovery behavior.
+-   GitHub Actions workflow.
+-   Environment variable example file.
+-   README and deployment instructions.
+-   Unit, integration, and security tests.
+-   A documented list of remaining manual setup steps.
+
+32. FINAL DEFINITION OF DONE The project is complete when the website
+    can be deployed to GitHub Pages, the Firebase backend and security
+    rules are configured, the authorized administrator can sign in,
+    upload a valid APK, have the backend validate and publish it, and a
+    public visitor can find and download the published version.
+
+The system must also demonstrate that invalid uploads are rejected,
+unauthorized writes are blocked, previous versions remain available
+after a failed publication, rollback works, analytics are recorded with
+clearly defined semantics, and deployment/test procedures are
+documented.
+
+END OF PRD
