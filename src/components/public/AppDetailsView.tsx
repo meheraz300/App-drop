@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
+import { useAds } from '../../context/AdContext';
 import {
   Download,
   Calendar,
@@ -12,6 +13,7 @@ import { GlassSurface, GlassButton, GlassTag } from '../common/GlassComponents';
 
 export const AppDetailsView: React.FC = () => {
   const { apps, versions, selectedAppId, navigateTo, requestDownload } = useApp();
+  const { showInterstitialVideo } = useAds();
 
   const [downloadingVersionId, setDownloadingVersionId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
@@ -47,7 +49,7 @@ export const AppDetailsView: React.FC = () => {
 
   const latestVersion = appVersions.find((v) => v.id === app.latestPublishedVersionId) || appVersions[0];
 
-  const handleDownload = async (versionId: string) => {
+  const executeDownload = async (versionId: string) => {
     try {
       setDownloadError(null);
       setDownloadingVersionId(versionId);
@@ -88,6 +90,14 @@ export const AppDetailsView: React.FC = () => {
       setDownloadingVersionId(null);
       setDownloadProgress(0);
     }
+  };
+
+  const handleDownload = (versionId: string) => {
+    // Interstitial Video Ad Trigger: Immediately play the full-screen demo interstitial video.
+    // After it plays, a cross (X) button appears. Closing it will trigger the APK download process.
+    showInterstitialVideo(() => {
+      executeDownload(versionId);
+    });
   };
 
   const formattedDate = app.updatedAt

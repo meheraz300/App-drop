@@ -22,20 +22,27 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 20
-          cache: 'npm'
+          bun-version: latest
+
+      - name: Cache Bun Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
 
       - name: Install Dependencies
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Run Unit Tests
-        run: npx tsx --test src/lib/apkValidator.test.ts src/lib/versionPolicy.test.ts src/lib/analyticsTracker.test.ts
+        run: bun run test
 
       - name: Build Web Application
-        run: npm run build
+        run: bun run build
         env:
           VITE_ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
 
