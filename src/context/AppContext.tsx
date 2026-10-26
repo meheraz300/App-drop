@@ -143,11 +143,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Domain records with local persistence (clean production state)
   const [apps, setApps] = useState<AppRecord[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.APPS);
-    if (saved && !saved.includes('app_signal') && !saved.includes('app_aether')) {
+    if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+        if (Array.isArray(parsed)) {
+          // Filter out demo data
+          const cleaned = parsed.filter(
+            (a) =>
+              !a.id?.includes('quantum') &&
+              !a.id?.includes('liquid') &&
+              !a.id?.includes('signal') &&
+              !a.id?.includes('aether') &&
+              !a.packageName?.includes('quantumguard') &&
+              !a.packageName?.includes('liquidflow')
+          );
+          if (cleaned.length > 0) return cleaned;
         }
       } catch {
         // Fallback to INITIAL_APPS
@@ -159,11 +169,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [versions, setVersions] = useState<VersionRecord[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.VERSIONS);
-    if (saved && !saved.includes('ver_signal') && !saved.includes('ver_aether')) {
+    if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+        if (Array.isArray(parsed)) {
+          // Filter out demo versions
+          const cleaned = parsed.filter(
+            (v) =>
+              !v.id?.includes('quantum') &&
+              !v.id?.includes('liquid') &&
+              !v.id?.includes('signal') &&
+              !v.id?.includes('aether') &&
+              !v.appId?.includes('quantum') &&
+              !v.appId?.includes('liquid')
+          );
+          if (cleaned.length > 0) return cleaned;
         }
       } catch {
         // Fallback to INITIAL_VERSIONS
@@ -175,11 +195,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [downloadStats, setDownloadStats] = useState<DownloadStat[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.STATS);
-    if (saved && !saved.includes('stat_sig') && !saved.includes('ver_aether')) {
+    if (saved) {
       try {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          return parsed;
+          const cleaned = parsed.filter(
+            (s) => !s.appId?.includes('quantum') && !s.appId?.includes('liquid')
+          );
+          return cleaned;
         }
       } catch {
         // Fallback to INITIAL_DOWNLOAD_STATS
@@ -193,11 +216,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.LOGS);
-    if (saved && !saved.includes('log_seed') && !saved.includes('app_aether')) {
+    if (saved) {
       try {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          return parsed;
+          const cleaned = parsed.filter(
+            (l) => !l.details?.includes('QuantumGuard') && !l.details?.includes('LiquidFlow')
+          );
+          return cleaned;
         }
       } catch {
         // Fallback to INITIAL_AUDIT_LOGS

@@ -23,9 +23,6 @@ import { StorageView } from './components/admin/StorageView';
 import { ActivityLogView } from './components/admin/ActivityLogView';
 import { SettingsView } from './components/admin/SettingsView';
 
-import { AdMobAppOpenDemo } from './components/ads/AdMobAppOpenDemo';
-import { AdMobBannerDemo } from './components/ads/AdMobBannerDemo';
-import { AdMobInterstitialVideoDemo } from './components/ads/AdMobInterstitialVideoDemo';
 
 import { GlassBackdrop } from './components/common/GlassComponents';
 
@@ -133,17 +130,9 @@ const AppContent: React.FC = () => {
     <div className="min-h-screen flex flex-col bg-transparent text-[var(--lg-ink)] font-sans selection:bg-[var(--lg-accent-start)]/20 selection:text-[var(--lg-accent-start)]">
       <GlassBackdrop />
       <Navbar />
-      {/* 2. Persistent Header Banner Ad (Demo Format) - Anchored adaptive banner below navigation bar */}
-      <AdMobBannerDemo />
       <MaintenanceBanner />
       <main className="flex-1 min-w-0">{renderContent()}</main>
       {!isAdminRoute && <Footer />}
-
-      {/* 1. Entry Ad (App Open Demo Format) - Triggers on initial load */}
-      <AdMobAppOpenDemo />
-
-      {/* 3. Download Interstitial Video Ad (Demo Format) - Triggers on Download APK */}
-      <AdMobInterstitialVideoDemo />
     </div>
   );
 };

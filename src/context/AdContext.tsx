@@ -1,6 +1,10 @@
 import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
 
 interface AdContextType {
+  // Demo ads state - disabled for clean production state
+  adsEnabled: boolean;
+  setAdsEnabled: (enabled: boolean) => void;
+
   // App Open Demo Ad
   isAppOpenAdVisible: boolean;
   closeAppOpenAd: () => void;
@@ -19,13 +23,16 @@ interface AdContextType {
 const AdContext = createContext<AdContextType | undefined>(undefined);
 
 export const AdProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // 1. Entry Ad (App Open Demo Format) - Triggers when the website initially loads and opens in the browser
-  const [isAppOpenAdVisible, setIsAppOpenAdVisible] = useState<boolean>(true);
+  // Demo ads disabled for clean production state
+  const [adsEnabled, setAdsEnabled] = useState<boolean>(false);
 
-  // 2. Persistent Header Banner Ad (Demo Format) - Anchored adaptive banner
-  const [isBannerVisible, setBannerVisible] = useState<boolean>(true);
+  // 1. Entry Ad (App Open Demo Format) - Disabled (false)
+  const [isAppOpenAdVisible, setIsAppOpenAdVisible] = useState<boolean>(false);
 
-  // 3. Download Interstitial Video Ad (Demo Format)
+  // 2. Persistent Header Banner Ad (Demo Format) - Disabled (false)
+  const [isBannerVisible, setBannerVisible] = useState<boolean>(false);
+
+  // 3. Download Interstitial Video Ad (Demo Format) - Disabled (false)
   const [isInterstitialVisible, setIsInterstitialVisible] = useState<boolean>(false);
   const pendingDownloadCallbackRef = useRef<(() => void) | null>(null);
 
@@ -34,12 +41,13 @@ export const AdProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   }, []);
 
   const triggerAppOpenAd = useCallback(() => {
-    setIsAppOpenAdVisible(true);
+    // Disabled in clean production state
+    setIsAppOpenAdVisible(false);
   }, []);
 
   const showInterstitialVideo = useCallback((onDismissAndDownload: () => void) => {
-    pendingDownloadCallbackRef.current = onDismissAndDownload;
-    setIsInterstitialVisible(true);
+    // Demo ads disabled - immediately proceed to APK download without ad interruption
+    onDismissAndDownload();
   }, []);
 
   const closeInterstitialVideo = useCallback(() => {
@@ -47,7 +55,6 @@ export const AdProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     const callback = pendingDownloadCallbackRef.current;
     pendingDownloadCallbackRef.current = null;
     if (callback) {
-      // Trigger the APK download process immediately upon closing
       callback();
     }
   }, []);
@@ -55,6 +62,8 @@ export const AdProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   return (
     <AdContext.Provider
       value={{
+        adsEnabled,
+        setAdsEnabled,
         isAppOpenAdVisible,
         closeAppOpenAd,
         triggerAppOpenAd,
