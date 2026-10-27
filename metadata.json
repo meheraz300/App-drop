@@ -1,5 +1,5 @@
 {
-  "name": "AppDrop — Android APK Distribution Hub",
+  "name": "AppDrop",
   "description": "Google Play-inspired Android application distribution platform. Manage releases, validate APK packages, track downloads, and provide fast, secure public downloads.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
