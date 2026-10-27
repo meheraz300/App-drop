@@ -130,6 +130,10 @@
       "schema": { "$ref": "#/entities/AppVersion" },
       "description": "Subcollection of version records for each application"
     },
+    "/versions/{versionId}": {
+      "schema": { "$ref": "#/entities/AppVersion" },
+      "description": "Top-level version records for direct real-time sync across applications"
+    },
     "/uploadSessions/{sessionId}": {
       "schema": { "$ref": "#/entities/UploadSession" },
       "description": "Upload sessions managed by backend/admin"

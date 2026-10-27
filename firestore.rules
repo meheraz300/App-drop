@@ -43,7 +43,7 @@ service cloud.firestore {
 
     function isValidAppVersion(data) {
       return data.versionName is string && data.versionName.size() > 0 && data.versionName.size() <= 50 &&
-             data.versionCode is int &&
+             (data.versionCode is int || data.versionCode is number) &&
              data.apkPath is string && data.apkPath.size() <= 500 &&
              data.apkSizeBytes is number &&
              data.sha256 is string && data.sha256.size() <= 64 &&
@@ -68,6 +68,22 @@ service cloud.firestore {
         allow update: if isAdmin() && isValidId(versionId) && isValidAppVersion(incoming());
         allow delete: if isAdmin() && isValidId(versionId);
       }
+    }
+
+    // Top-level versions collection (for direct version queries & sync)
+    match /versions/{versionId} {
+      allow get: if (resource.data.status == 'published') || isAdmin();
+      allow list: if (resource.data.status == 'published') || isAdmin();
+
+      allow create: if isAdmin() && isValidId(versionId) && isValidAppVersion(incoming());
+      allow update: if isAdmin() && isValidId(versionId) && isValidAppVersion(incoming());
+      allow delete: if isAdmin() && isValidId(versionId);
+    }
+
+    // Collection group for published versions
+    match /{path=**}/versions/{versionId} {
+      allow get: if (resource.data.status == 'published') || isAdmin();
+      allow list: if (resource.data.status == 'published') || isAdmin();
     }
 
     // Upload Sessions

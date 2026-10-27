@@ -20,8 +20,26 @@ import {
   INITIAL_AUDIT_LOGS,
   INITIAL_SYSTEM_CONFIG,
 } from '../lib/seedData';
-import { auth, googleAuthProvider, ADMIN_CONFIGURED_EMAIL, testConnection } from '../lib/firebase';
+import {
+  auth,
+  db,
+  googleAuthProvider,
+  ADMIN_CONFIGURED_EMAIL,
+  testConnection,
+  handleFirestoreError,
+  OperationType,
+} from '../lib/firebase';
 import { signInWithPopup, onAuthStateChanged, signOut as fbSignOut } from 'firebase/auth';
+import {
+  collection,
+  doc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  onSnapshot,
+  query,
+  where,
+} from 'firebase/firestore';
 import {
   inspectApkBinary,
   validateApkAgainstApp,
@@ -399,6 +417,111 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => unsubscribe();
   }, []);
 
+  // Real-time synchronization for published applications and versions
+  useEffect(() => {
+    if (!db) return;
+
+    // For public visitors: query public, published applications in real-time
+    // For admin: query all applications so admin dashboard sees drafts/archived too
+    const appsQuery = user?.isAdmin
+      ? collection(db, 'apps')
+      : query(
+          collection(db, 'apps'),
+          where('visibility', '==', 'public'),
+          where('status', '==', 'published')
+        );
+
+    const unsubscribeApps = onSnapshot(
+      appsQuery,
+      (snapshot) => {
+        const remoteApps: AppRecord[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data() as AppRecord;
+          if (data && data.id) {
+            remoteApps.push(data);
+          }
+        });
+
+        // Clean out demo records if any exist in remote store
+        const cleanedRemoteApps = remoteApps.filter(
+          (a) =>
+            !a.id?.includes('quantum') &&
+            !a.id?.includes('liquid') &&
+            !a.id?.includes('signal') &&
+            !a.id?.includes('aether') &&
+            !a.packageName?.includes('quantumguard') &&
+            !a.packageName?.includes('liquidflow')
+        );
+
+        // Sort: featured first, then newest updated/created
+        cleanedRemoteApps.sort((a, b) => {
+          if (a.featured && !b.featured) return -1;
+          if (!a.featured && b.featured) return 1;
+          return (
+            new Date(b.updatedAt || b.createdAt).getTime() -
+            new Date(a.updatedAt || a.createdAt).getTime()
+          );
+        });
+
+        setApps((prevLocal) => {
+          // If Firestore returns live apps, immediately sync them to the UI in real-time
+          if (cleanedRemoteApps.length > 0) {
+            return cleanedRemoteApps;
+          }
+          return prevLocal;
+        });
+      },
+      (error) => {
+        console.warn('Real-time apps snapshot sync notice:', error.message);
+      }
+    );
+
+    // Real-time listener for versions
+    const versionsQuery = user?.isAdmin
+      ? collection(db, 'versions')
+      : query(collection(db, 'versions'), where('status', '==', 'published'));
+
+    const unsubscribeVersions = onSnapshot(
+      versionsQuery,
+      (snapshot) => {
+        const remoteVersions: VersionRecord[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data() as VersionRecord;
+          if (data && data.id) {
+            remoteVersions.push(data);
+          }
+        });
+
+        const cleanedRemoteVersions = remoteVersions.filter(
+          (v) =>
+            !v.id?.includes('quantum') &&
+            !v.id?.includes('liquid') &&
+            !v.id?.includes('signal') &&
+            !v.id?.includes('aether') &&
+            !v.appId?.includes('quantum') &&
+            !v.appId?.includes('liquid')
+        );
+
+        if (cleanedRemoteVersions.length > 0) {
+          setVersions((prevLocal) => {
+            const map = new Map<string, VersionRecord>();
+            for (const v of prevLocal) map.set(v.id, v);
+            for (const v of cleanedRemoteVersions) map.set(v.id, v);
+            return Array.from(map.values());
+          });
+        }
+      },
+      (error) => {
+        console.warn('Real-time versions snapshot sync notice:', error.message);
+      }
+    );
+
+    return () => {
+      unsubscribeApps();
+      unsubscribeVersions();
+    };
+  }, [user?.isAdmin]);
+
   const signInWithGoogle = async () => {
     try {
       const result = await signInWithPopup(auth, googleAuthProvider);
@@ -496,6 +619,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setApps((prev) => [newApp, ...prev]);
     appendAuditLog('app.created', newId, null, `Created application "${newApp.name}" (${newApp.packageName}).`);
+
+    // Real-time synchronization to Firestore
+    try {
+      await setDoc(doc(db, 'apps', newId), newApp);
+    } catch (err) {
+      console.warn('Firestore real-time sync createApp note:', err);
+    }
+
     return newId;
   };
 
@@ -505,22 +636,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       prev.map((app) => (app.id === appId ? { ...app, ...data, updatedAt: now } : app))
     );
     appendAuditLog('app.updated', appId, null, `Updated metadata for application.`);
+
+    // Real-time synchronization to Firestore
+    try {
+      await updateDoc(doc(db, 'apps', appId), { ...data, updatedAt: now });
+    } catch (err) {
+      console.warn('Firestore real-time sync updateApp note:', err);
+    }
   };
 
   const archiveApp = async (appId: string) => {
     const now = new Date().toISOString();
     setApps((prev) =>
-      prev.map((app) => (app.id === appId ? { ...app, status: 'archived', archivedAt: now } : app))
+      prev.map((app) => (app.id === appId ? { ...app, status: 'archived', archivedAt: now, updatedAt: now } : app))
     );
     appendAuditLog('app.archived', appId, null, `Archived application. Hidden from public listings.`);
+
+    // Real-time synchronization to Firestore
+    try {
+      await updateDoc(doc(db, 'apps', appId), { status: 'archived', archivedAt: now, updatedAt: now });
+    } catch (err) {
+      console.warn('Firestore real-time sync archiveApp note:', err);
+    }
   };
 
   const restoreApp = async (appId: string) => {
     const now = new Date().toISOString();
     setApps((prev) =>
-      prev.map((app) => (app.id === appId ? { ...app, status: 'published', archivedAt: null } : app))
+      prev.map((app) => (app.id === appId ? { ...app, status: 'published', archivedAt: null, updatedAt: now } : app))
     );
     appendAuditLog('app.restored', appId, null, `Restored application to published state.`);
+
+    // Real-time synchronization to Firestore
+    try {
+      await updateDoc(doc(db, 'apps', appId), { status: 'published', archivedAt: null, updatedAt: now });
+    } catch (err) {
+      console.warn('Firestore real-time sync restoreApp note:', err);
+    }
   };
 
   const deleteApp = async (appId: string) => {
@@ -535,7 +687,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await deleteApkBinary(v.id);
     }
 
-    // Remove app and its versions
+    // Remove app and its versions from local state
     setApps((prev) => prev.filter((a) => a.id !== appId));
     setVersions((prev) => prev.filter((v) => v.appId !== appId));
 
@@ -545,6 +697,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       null,
       `Permanently deleted application "${targetApp.name}". Removed ${impact.versionCount} versions and freed ${(impact.totalStorageBytes / (1024 * 1024)).toFixed(1)} MB.`
     );
+
+    // Real-time synchronization to Firestore
+    try {
+      await deleteDoc(doc(db, 'apps', appId));
+      for (const v of appVers) {
+        await deleteDoc(doc(db, 'apps', appId, 'versions', v.id)).catch(() => {});
+        await deleteDoc(doc(db, 'versions', v.id)).catch(() => {});
+      }
+    } catch (err) {
+      console.warn('Firestore real-time sync deleteApp note:', err);
+    }
   };
 
   const rollbackVersion = async (appId: string, targetVersionId: string) => {
@@ -571,6 +734,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `Rolled back current published version of "${targetApp.name}" to ${targetVer.versionName} (v${targetVer.versionCode}).`
     );
 
+    // Real-time synchronization to Firestore
+    try {
+      await updateDoc(doc(db, 'apps', appId), {
+        latestPublishedVersionId: targetVersionId,
+        updatedAt: new Date().toISOString(),
+      });
+      for (const v of updatedVersions) {
+        await updateDoc(doc(db, 'versions', v.id), { isLatest: v.id === targetVersionId }).catch(() => {});
+        await updateDoc(doc(db, 'apps', appId, 'versions', v.id), { isLatest: v.id === targetVersionId }).catch(() => {});
+      }
+    } catch (err) {
+      console.warn('Firestore real-time sync rollbackVersion note:', err);
+    }
+
     return { success: true };
   };
 
@@ -586,6 +763,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         versionId,
         `Updated release notes for version ${targetVer.versionName}.`
       );
+
+      // Real-time synchronization to Firestore
+      try {
+        await updateDoc(doc(db, 'versions', versionId), { releaseNotes });
+        await updateDoc(doc(db, 'apps', targetVer.appId, 'versions', versionId), { releaseNotes }).catch(() => {});
+      } catch (err) {
+        console.warn('Firestore real-time sync updateReleaseNotes note:', err);
+      }
     }
   };
 
@@ -612,6 +797,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setDownloadStats(updatedStats);
     setDownloadEvents(updatedEvents);
+
+    // Sync download event to Firestore
+    try {
+      const eventDoc = {
+        id: reqId,
+        appId,
+        versionId,
+        eventType: 'download_url_issued',
+        createdAt: new Date().toISOString(),
+        requestId: reqId,
+      };
+      await setDoc(doc(db, 'downloadEvents', reqId), eventDoc);
+    } catch {
+      // Non-blocking download event record
+    }
 
     // Retrieve exact binary blob from IndexedDB storage
     const storedBlob = await getApkBinary(versionId);
