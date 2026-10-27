@@ -170,7 +170,7 @@ export const ApkUploader: React.FC = () => {
       anchor.click();
       document.body.removeChild(anchor);
 
-      setDownloadNotice(`Binary downloaded with exact original byte size verified!`);
+      setDownloadNotice(`Downloaded "${fileName}" with exact original byte size verified!`);
     } catch (err: any) {
       setDownloadNotice(`Download test failed: ${err?.message || err}`);
     } finally {

@@ -41,6 +41,7 @@ import {
   generateRequestId,
   computeDownloadAggregates,
 } from '../lib/analyticsTracker';
+import { formatApkDownloadFileName } from '../lib/downloadHelper';
 
 export type AppRoute =
   | 'home'
@@ -632,7 +633,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const downloadUrl = URL.createObjectURL(apkBlob);
-    const fileName = `${targetApp.packageName}-v${targetVer.versionName}.apk`;
+    // Dynamically use the application's display name for the APK file name across all published apps
+    const fileName = formatApkDownloadFileName(targetApp.name, targetVer.versionName);
 
     return { downloadUrl, fileName };
   };

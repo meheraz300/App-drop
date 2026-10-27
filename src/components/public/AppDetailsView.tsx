@@ -9,6 +9,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { GlassSurface, GlassButton, GlassTag } from '../common/GlassComponents';
+import { formatApkDownloadFileName } from '../../lib/downloadHelper';
 
 export const AppDetailsView: React.FC = () => {
   const { apps, versions, selectedAppId, navigateTo, requestDownload } = useApp();
@@ -70,9 +71,12 @@ export const AppDetailsView: React.FC = () => {
 
       // Slight delay so the user clearly sees 100% completion before file triggers
       setTimeout(() => {
+        const targetVer = appVersions.find((v) => v.id === versionId);
+        const resolvedFileName =
+          fileName || formatApkDownloadFileName(app.name, targetVer?.versionName);
         const anchor = document.createElement('a');
         anchor.href = downloadUrl;
-        anchor.download = fileName;
+        anchor.download = resolvedFileName;
         document.body.appendChild(anchor);
         anchor.click();
         document.body.removeChild(anchor);
