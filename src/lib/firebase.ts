@@ -63,21 +63,16 @@ googleAuthProvider.setCustomParameters({ prompt: 'select_account' });
 
 /**
  * Validates connection to Firestore at boot time as mandated by Firebase skill.
- * Implements defensive timeout guard to gracefully handle offline/sandboxed environments.
  */
 export async function testConnection(): Promise<boolean> {
   try {
-    const checkDoc = getDoc(doc(db, 'systemConfig', 'global'));
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('the client is offline (connection timeout)')), 2500)
-    );
-    await Promise.race([checkDoc, timeout]);
+    await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error('Please check your Firebase configuration.');
       return false;
     }
-    // Expected in initial security state or empty database
     return true;
   }
 }

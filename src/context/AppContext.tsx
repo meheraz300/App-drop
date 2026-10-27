@@ -464,11 +464,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
 
         setApps((prevLocal) => {
-          // If Firestore returns live apps, immediately sync them to the UI in real-time
-          if (cleanedRemoteApps.length > 0) {
-            return cleanedRemoteApps;
-          }
-          return prevLocal;
+          // Keep recently created local apps (in-flight within last 15s) until Firestore snapshot confirms
+          const now = Date.now();
+          const inFlightLocal = prevLocal.filter(
+            (local) =>
+              !cleanedRemoteApps.some((r) => r.id === local.id) &&
+              now - new Date(local.createdAt || 0).getTime() < 15000
+          );
+          const combined = [...cleanedRemoteApps, ...inFlightLocal];
+          combined.sort((a, b) => {
+            if (a.featured && !b.featured) return -1;
+            if (!a.featured && b.featured) return 1;
+            return (
+              new Date(b.updatedAt || b.createdAt).getTime() -
+              new Date(a.updatedAt || a.createdAt).getTime()
+            );
+          });
+          return combined;
         });
       },
       (error) => {
@@ -476,7 +488,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     );
 
-    // Real-time listener for versions
+    // Real-time listener for versions across all devices
     const versionsQuery = user?.isAdmin
       ? collection(db, 'versions')
       : query(collection(db, 'versions'), where('status', '==', 'published'));
@@ -502,23 +514,61 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             !v.appId?.includes('liquid')
         );
 
-        if (cleanedRemoteVersions.length > 0) {
-          setVersions((prevLocal) => {
-            const map = new Map<string, VersionRecord>();
-            for (const v of prevLocal) map.set(v.id, v);
-            for (const v of cleanedRemoteVersions) map.set(v.id, v);
-            return Array.from(map.values());
-          });
-        }
+        setVersions((prevLocal) => {
+          const now = Date.now();
+          const inFlightLocal = prevLocal.filter(
+            (local) =>
+              !cleanedRemoteVersions.some((r) => r.id === local.id) &&
+              now - new Date(local.createdAt || 0).getTime() < 15000
+          );
+          return [...cleanedRemoteVersions, ...inFlightLocal];
+        });
       },
       (error) => {
         console.warn('Real-time versions snapshot sync notice:', error.message);
       }
     );
 
+    // Instant local cross-tab real-time channel
+    let crossTabChannel: BroadcastChannel | null = null;
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        crossTabChannel = new BroadcastChannel('appdrop_realtime_channel');
+        crossTabChannel.onmessage = (event) => {
+          if (!event.data) return;
+          if (event.data.type === 'APP_PUBLISHED') {
+            const { app, version } = event.data;
+            if (app) {
+              setApps((prev) => {
+                const map = new Map(prev.map((a) => [a.id, a]));
+                map.set(app.id, app);
+                return Array.from(map.values());
+              });
+            }
+            if (version) {
+              setVersions((prev) => {
+                const map = new Map(prev.map((v) => [v.id, v]));
+                map.set(version.id, version);
+                return Array.from(map.values());
+              });
+            }
+          } else if (event.data.type === 'APP_DELETED') {
+            const { appId } = event.data;
+            if (appId) {
+              setApps((prev) => prev.filter((a) => a.id !== appId));
+              setVersions((prev) => prev.filter((v) => v.appId !== appId));
+            }
+          }
+        };
+      }
+    } catch {}
+
     return () => {
       unsubscribeApps();
       unsubscribeVersions();
+      if (crossTabChannel) {
+        crossTabChannel.close();
+      }
     };
   }, [user?.isAdmin]);
 
@@ -588,6 +638,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAuditLogs((prev) => [newLog, ...prev]);
   };
 
+  // Cross-tab synchronization broadcast helper
+  const broadcastSync = (payload: {
+    type: 'APP_PUBLISHED' | 'APP_DELETED';
+    app?: AppRecord;
+    version?: VersionRecord;
+    appId?: string;
+  }) => {
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        const ch = new BroadcastChannel('appdrop_realtime_channel');
+        ch.postMessage(payload);
+        ch.close();
+      }
+    } catch {}
+  };
+
   // App mutations
   const createApp = async (data: Partial<AppRecord>): Promise<string> => {
     const newId = `app_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -597,7 +663,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: newId,
       name: data.name || 'Untitled Application',
       packageName: data.packageName || 'com.example.app',
-      shortDescription: data.shortDescription || '',
+      shortDescription: (data.shortDescription || '').slice(0, 200),
       description: data.description || '',
       category: data.category || 'Utilities',
       tags: data.tags || ['utility'],
@@ -619,6 +685,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setApps((prev) => [newApp, ...prev]);
     appendAuditLog('app.created', newId, null, `Created application "${newApp.name}" (${newApp.packageName}).`);
+    broadcastSync({ type: 'APP_PUBLISHED', app: newApp });
 
     // Real-time synchronization to Firestore
     try {
@@ -632,10 +699,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateApp = async (appId: string, data: Partial<AppRecord>) => {
     const now = new Date().toISOString();
+    let updatedTarget: AppRecord | null = null;
     setApps((prev) =>
-      prev.map((app) => (app.id === appId ? { ...app, ...data, updatedAt: now } : app))
+      prev.map((app) => {
+        if (app.id === appId) {
+          updatedTarget = { ...app, ...data, updatedAt: now };
+          return updatedTarget;
+        }
+        return app;
+      })
     );
     appendAuditLog('app.updated', appId, null, `Updated metadata for application.`);
+    if (updatedTarget) {
+      broadcastSync({ type: 'APP_PUBLISHED', app: updatedTarget });
+    }
 
     // Real-time synchronization to Firestore
     try {
@@ -647,10 +724,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const archiveApp = async (appId: string) => {
     const now = new Date().toISOString();
+    let archivedTarget: AppRecord | null = null;
     setApps((prev) =>
-      prev.map((app) => (app.id === appId ? { ...app, status: 'archived', archivedAt: now, updatedAt: now } : app))
+      prev.map((app) => {
+        if (app.id === appId) {
+          archivedTarget = { ...app, status: 'archived', archivedAt: now, updatedAt: now };
+          return archivedTarget;
+        }
+        return app;
+      })
     );
     appendAuditLog('app.archived', appId, null, `Archived application. Hidden from public listings.`);
+    if (archivedTarget) {
+      broadcastSync({ type: 'APP_PUBLISHED', app: archivedTarget });
+    }
 
     // Real-time synchronization to Firestore
     try {
@@ -662,10 +749,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const restoreApp = async (appId: string) => {
     const now = new Date().toISOString();
+    let restoredTarget: AppRecord | null = null;
     setApps((prev) =>
-      prev.map((app) => (app.id === appId ? { ...app, status: 'published', archivedAt: null, updatedAt: now } : app))
+      prev.map((app) => {
+        if (app.id === appId) {
+          restoredTarget = { ...app, status: 'published', archivedAt: null, updatedAt: now };
+          return restoredTarget;
+        }
+        return app;
+      })
     );
     appendAuditLog('app.restored', appId, null, `Restored application to published state.`);
+    if (restoredTarget) {
+      broadcastSync({ type: 'APP_PUBLISHED', app: restoredTarget });
+    }
 
     // Real-time synchronization to Firestore
     try {
@@ -690,6 +787,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Remove app and its versions from local state
     setApps((prev) => prev.filter((a) => a.id !== appId));
     setVersions((prev) => prev.filter((v) => v.appId !== appId));
+    broadcastSync({ type: 'APP_DELETED', appId });
 
     appendAuditLog(
       'app.deleted',
@@ -1094,17 +1192,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ]);
 
       // Update app latest published pointer
+      const updatedAppRecord: AppRecord = {
+        ...targetApp,
+        latestPublishedVersionId: newVersionId,
+        updatedAt: now,
+      };
+
       setApps((prev) =>
-        prev.map((a) =>
-          a.id === targetAppId
-            ? {
-                ...a,
-                latestPublishedVersionId: newVersionId,
-                updatedAt: now,
-              }
-            : a
-        )
+        prev.map((a) => (a.id === targetAppId ? updatedAppRecord : a))
       );
+
+      // Real-time synchronization to Firestore
+      try {
+        await setDoc(doc(db, 'apps', targetAppId), updatedAppRecord);
+        await setDoc(doc(db, 'versions', newVersionId), newVersion);
+        await setDoc(doc(db, 'apps', targetAppId, 'versions', newVersionId), newVersion);
+
+        // Demote previous versions in Firestore
+        const prevAppVersions = versions.filter(
+          (v) => v.appId === targetAppId && v.id !== newVersionId
+        );
+        for (const pv of prevAppVersions) {
+          await updateDoc(doc(db, 'versions', pv.id), { isLatest: false }).catch(() => {});
+          await updateDoc(doc(db, 'apps', targetAppId, 'versions', pv.id), { isLatest: false }).catch(() => {});
+        }
+      } catch (fireErr) {
+        console.warn('Firestore real-time sync startApkUpload note:', fireErr);
+      }
+
+      // Cross-tab real-time broadcast
+      broadcastSync({
+        type: 'APP_PUBLISHED',
+        app: updatedAppRecord,
+        version: newVersion,
+      });
 
       setUploadProgress({
         stage: 'completed',
