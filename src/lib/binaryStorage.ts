@@ -224,9 +224,107 @@ export function generateIntactApkBlob(
 }
 
 /**
+ * Uploads the intact APK binary to the full-stack server endpoint (/api/apks/upload).
+ * Uses XMLHttpRequest with xhr.upload.onprogress to provide real-time, continuous
+ * byte-by-byte transfer progress (e.g. 10% -> 100%) without freezing.
+ */
+export async function uploadApkToServer(
+  versionId: string,
+  blob: Blob | File,
+  fileName?: string,
+  onProgress?: (percentage: number) => void
+): Promise<{ downloadUrl: string; sizeBytes: number } | null> {
+  const cleanFileName = fileName || (blob instanceof File ? blob.name : `${versionId}.apk`);
+
+  // Browser environment: use XMLHttpRequest for real upload progress events
+  if (typeof XMLHttpRequest !== 'undefined') {
+    return new Promise((resolve) => {
+      try {
+        const xhr = new XMLHttpRequest();
+        const basePath =
+          typeof window !== 'undefined' && window.location.pathname.startsWith('/App-drop')
+            ? '/App-drop'
+            : '';
+        const uploadUrl = `${basePath}/api/apks/upload`;
+
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable && event.total > 0 && onProgress) {
+            const pct = Math.round((event.loaded / event.total) * 100);
+            onProgress(pct);
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const data = JSON.parse(xhr.responseText);
+              resolve({
+                downloadUrl: data.downloadUrl || `${basePath}/api/apks/${versionId}/download`,
+                sizeBytes: data.sizeBytes || blob.size,
+              });
+              return;
+            } catch {
+              resolve({
+                downloadUrl: `${basePath}/api/apks/${versionId}/download`,
+                sizeBytes: blob.size,
+              });
+              return;
+            }
+          }
+          resolve(null);
+        };
+
+        xhr.onerror = () => resolve(null);
+        xhr.ontimeout = () => resolve(null);
+        xhr.timeout = 120000; // 2 min timeout for very large APK files
+
+        xhr.open('POST', uploadUrl, true);
+        const formData = new FormData();
+        formData.append('versionId', versionId);
+        formData.append('fileName', cleanFileName);
+        formData.append('file', blob, cleanFileName);
+        xhr.send(formData);
+      } catch (err) {
+        console.warn('uploadApkToServer XHR error:', err);
+        resolve(null);
+      }
+    });
+  }
+
+  // Node.js or fallback environment
+  try {
+    if (typeof fetch !== 'undefined') {
+      const formData = new FormData();
+      formData.append('versionId', versionId);
+      formData.append('fileName', cleanFileName);
+      formData.append('file', blob, cleanFileName);
+
+      const res = await fetch('/api/apks/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      if (res.ok) {
+        const json = await res.json().catch(() => ({}));
+        if (onProgress) onProgress(100);
+        return {
+          downloadUrl: json.downloadUrl || `/api/apks/${versionId}/download`,
+          sizeBytes: json.sizeBytes || blob.size,
+        };
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
+/**
  * Uploads the intact APK binary to Firebase Cloud Storage.
  * Stores under published/${appId}/${versionId}/${fileName}
  * and returns the official public download URL and storage path.
+ *
+ * Includes a strict timeout guard (3.5 seconds) to ensure that if the Cloud Storage
+ * bucket does not exist or network times out, it fails fast instead of getting
+ * stuck at 0% for 10 minutes.
  */
 export async function uploadApkToCloudStorage(
   appId: string,
@@ -244,6 +342,13 @@ export async function uploadApkToCloudStorage(
       return null;
     }
 
+    // Configure maxUploadRetryTime to fail quickly if bucket is unreachable
+    try {
+      if ('maxUploadRetryTime' in storage) {
+        (storage as any).maxUploadRetryTime = 3000;
+      }
+    } catch {}
+
     const cleanFileName = fileName.endsWith('.apk') ? fileName : `${fileName}.apk`;
     const storagePath = `published/${appId}/${versionId}/${cleanFileName}`;
     const storageRef = ref(storage, storagePath);
@@ -259,7 +364,7 @@ export async function uploadApkToCloudStorage(
 
     const uploadTask = uploadBytesResumable(storageRef, blob, metadata);
 
-    return new Promise((resolve) => {
+    const taskPromise = new Promise<{ downloadUrl: string; storagePath: string } | null>((resolve) => {
       uploadTask.on(
         'state_changed',
         (snapshot) => {
@@ -283,6 +388,18 @@ export async function uploadApkToCloudStorage(
         }
       );
     });
+
+    // Hard timeout guard of 3.5 seconds to guarantee the upload pipeline NEVER freezes at 0%
+    const timeoutPromise = new Promise<{ downloadUrl: string; storagePath: string } | null>((resolve) => {
+      setTimeout(() => {
+        try {
+          uploadTask.cancel();
+        } catch {}
+        resolve(null);
+      }, 3500);
+    });
+
+    return await Promise.race([taskPromise, timeoutPromise]);
   } catch (err) {
     console.warn('uploadApkToCloudStorage note:', err);
     return null;
@@ -291,10 +408,10 @@ export async function uploadApkToCloudStorage(
 
 /**
  * Stores the original, complete APK binary blob in persistent storage:
+ * - Dedicated Server storage endpoint (/api/apks/upload) with continuous byte-progress streaming
  * - Firebase Cloud Storage (published/${appId}/${versionId}/${fileName})
- * - IndexedDB
- * - Cache Storage API
- * - Server storage endpoint (/api/apks/upload)
+ * - Persistent IndexedDB ('AppDropBinaryDB')
+ * - Cache Storage API ('appdrop-apk-cache')
  * - Firestore binary chunks (/apkChunks/:versionId/chunks)
  */
 export async function saveApkBinary(
@@ -306,27 +423,16 @@ export async function saveApkBinary(
     sha256?: string;
     onProgress?: (percentage: number) => void;
   }
-): Promise<{ cloudResult?: { downloadUrl: string; storagePath: string } | null }> {
+): Promise<{
+  cloudResult?: { downloadUrl: string; storagePath: string } | null;
+  serverResult?: { downloadUrl: string; sizeBytes: number } | null;
+  effectiveDownloadUrl: string;
+  effectiveStoragePath: string;
+}> {
   const totalSize = blob.size;
   const fileName = options?.fileName || (blob instanceof File ? blob.name : `${versionId}.apk`);
 
-  // 1. Upload intact complete package to Firebase Cloud Storage
-  let cloudResult: { downloadUrl: string; storagePath: string } | null = null;
-  if (options?.appId) {
-    try {
-      cloudResult = await uploadApkToCloudStorage(
-        options.appId,
-        versionId,
-        fileName,
-        blob,
-        options.onProgress
-      );
-    } catch (e) {
-      console.warn('Cloud storage upload error caught:', e);
-    }
-  }
-
-  // 2. Store in local IndexedDB
+  // 1. Store in local IndexedDB immediately (instant preservation of full bytes)
   try {
     const database = await openDatabase();
     await new Promise<void>((resolve, reject) => {
@@ -341,7 +447,7 @@ export async function saveApkBinary(
     console.warn('IndexedDB saveApkBinary note:', err);
   }
 
-  // 2. Store in Cache Storage API for robust cross-tab preservation
+  // 2. Store in Cache Storage API for robust cross-tab retrieval
   try {
     if (typeof caches !== 'undefined') {
       const cache = await caches.open(CACHE_NAME);
@@ -358,25 +464,37 @@ export async function saveApkBinary(
     console.warn('Cache API save note:', err);
   }
 
-  // 3. Attempt upload to dedicated backend server if available
+  // 3. Upload to dedicated backend server with real-time byte transfer progress reporting
+  let serverResult: { downloadUrl: string; sizeBytes: number } | null = null;
   try {
-    if (typeof fetch !== 'undefined') {
-      const formData = new FormData();
-      formData.append('versionId', versionId);
-      formData.append('fileName', fileName);
-      formData.append('file', blob, fileName);
+    serverResult = await uploadApkToServer(versionId, blob, fileName, (pct) => {
+      if (options?.onProgress) {
+        options.onProgress(pct);
+      }
+    });
+  } catch (err) {
+    console.warn('Server upload error caught:', err);
+  }
 
-      await fetch('/api/apks/upload', {
-        method: 'POST',
-        body: formData,
-      }).catch(() => {
-        // Server might be in static deployment mode
-      });
+  // 4. Attempt upload to Firebase Cloud Storage (guarded with 3.5s timeout)
+  let cloudResult: { downloadUrl: string; storagePath: string } | null = null;
+  if (options?.appId) {
+    try {
+      cloudResult = await uploadApkToCloudStorage(
+        options.appId,
+        versionId,
+        fileName,
+        blob,
+        // Only update progress if server upload hasn't already driven it
+        serverResult ? undefined : options?.onProgress
+      );
+    } catch (e) {
+      console.warn('Cloud storage upload error caught:', e);
     }
-  } catch {}
+  }
 
-  // 4. Store in Firestore binary chunks if size <= 35 MB
-  // Allows visitors on different devices to download intact binary even on static GitHub Pages
+  // 5. Store in Firestore binary chunks if size <= 35 MB
+  // Allows visitors on different devices to download intact binary even on static hostings
   if (totalSize <= MAX_FIRESTORE_CHUNKING_BYTES) {
     try {
       const fsContext = await getFirestoreContext();
@@ -404,10 +522,6 @@ export async function saveApkBinary(
             data: b64,
             createdAt: now,
           });
-
-          if (options?.onProgress) {
-            options.onProgress(Math.round(((i + 1) / totalChunks) * 100));
-          }
         }
       }
     } catch (chunkErr) {
@@ -415,7 +529,21 @@ export async function saveApkBinary(
     }
   }
 
-  return { cloudResult };
+  const effectiveDownloadUrl =
+    cloudResult?.downloadUrl ||
+    serverResult?.downloadUrl ||
+    `/api/apks/${versionId}/download`;
+
+  const effectiveStoragePath =
+    cloudResult?.storagePath ||
+    `published/${options?.appId || 'app'}/${versionId}/${fileName}`;
+
+  return {
+    cloudResult,
+    serverResult,
+    effectiveDownloadUrl,
+    effectiveStoragePath,
+  };
 }
 
 /**
@@ -478,6 +606,7 @@ export async function getApkBinary(
     urlsToTry.push(options.downloadUrl.trim());
   }
   urlsToTry.push(`/api/apks/${versionId}/download`);
+  urlsToTry.push(`/App-drop/api/apks/${versionId}/download`);
 
   for (const url of urlsToTry) {
     try {

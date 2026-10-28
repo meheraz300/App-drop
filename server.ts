@@ -50,9 +50,13 @@ const handleApkDownload = (req: express.Request, res: express.Response) => {
   const fileSize = stat.size;
   const range = req.headers.range;
 
+  const customName = typeof req.query.name === 'string' && req.query.name.trim() ? req.query.name.trim() : `${versionId}.apk`;
+  const cleanFileName = customName.endsWith('.apk') ? customName : `${customName}.apk`;
+
   res.setHeader('Content-Type', 'application/vnd.android.package-archive');
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.setHeader('Content-Disposition', `attachment; filename="${cleanFileName}"`);
 
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');

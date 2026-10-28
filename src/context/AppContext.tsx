@@ -879,8 +879,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const requestDownload = async (appId: string, versionId: string) => {
-    const targetApp = apps.find((a) => a.id === appId);
-    const targetVer = versions.find((v) => v.id === versionId);
+    let targetApp = apps.find((a) => a.id === appId);
+    let targetVer = versions.find((v) => v.id === versionId);
+
+    if (!targetApp || !targetVer) {
+      try {
+        const { getDoc, doc: fsDoc } = await import('firebase/firestore');
+        if (!targetApp && db) {
+          const appSnap = await getDoc(fsDoc(db, 'apps', appId));
+          if (appSnap.exists()) targetApp = appSnap.data() as AppRecord;
+        }
+        if (!targetVer && db) {
+          const verSnap = await getDoc(fsDoc(db, 'versions', versionId));
+          if (verSnap.exists()) targetVer = verSnap.data() as VersionRecord;
+        }
+      } catch (err) {
+        console.warn('requestDownload Firestore lookup fallback note:', err);
+      }
+    }
 
     if (!targetApp || !targetVer) {
       throw new Error('Application or version not found.');
@@ -1036,24 +1052,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const buffer = await file.arrayBuffer();
 
-      // Simulated transfer progress
-      for (let p = 25; p <= 65; p += 15) {
-        await new Promise((r) => setTimeout(r, 70));
-        setUploadProgress((prev) => ({
-          ...prev,
-          percentage: p,
-          details: `Transferring APK to staging area (${p}%)...`,
-        }));
-      }
-
       // Step 2: Validating stage
       setUploadProgress({
         stage: 'validating',
-        percentage: 75,
-        details: 'Backend verifying APK structure, package identity, and digital signature...',
+        percentage: 28,
+        details: 'Inspecting APK binary structure, package identity, and digital signatures...',
       });
 
-      await new Promise((r) => setTimeout(r, 100));
       const metadata = await inspectApkBinary(buffer, file.name);
 
       // Find target app if specified, or find by extracted package name, or auto-create!
@@ -1116,7 +1121,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // If specified app was chosen, verify package name matches
         if (targetApp.packageName.toLowerCase() !== metadata.packageName.toLowerCase()) {
           const err = `Package name mismatch. APK contains "${metadata.packageName}", but application requires "${targetApp.packageName}".`;
-          setUploadProgress({ stage: 'error', percentage: 75, error: err });
+          setUploadProgress({ stage: 'error', percentage: 28, error: err });
           return false;
         }
       }
@@ -1137,7 +1142,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const errorMsg = validation.errors.join(' ');
         setUploadProgress({
           stage: 'error',
-          percentage: 75,
+          percentage: 28,
           error: errorMsg,
         });
         appendAuditLog(
@@ -1150,15 +1155,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return false;
       }
 
-      // Step 3: Publishing stage
+      // Step 3: Streaming binary to multi-tier persistent storage
+      const newVersionId = `ver_${targetAppId}_${Date.now()}`;
+
       setUploadProgress({
-        stage: 'publishing',
-        percentage: 90,
-        details: 'Atomically promoting new version and storing verified binary...',
+        stage: 'uploading',
+        percentage: 35,
+        details: `Streaming complete APK binary (${(file.size / (1024 * 1024)).toFixed(2)} MB) to persistent storage...`,
         verifiedMetadata: metadata,
       });
-
-      const newVersionId = `ver_${targetAppId}_${Date.now()}`;
 
       // Persist the exact original binary blob in Firebase Cloud Storage,
       // as well as multi-tier IndexedDB, Cache API, Server, and Firestore chunks
@@ -1169,18 +1174,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         onProgress: (pct) => {
           setUploadProgress((prev) => ({
             ...prev,
-            percentage: Math.min(95, 75 + Math.round(pct * 0.2)),
-            details: `Streaming full-size package to Firebase Cloud Storage (${pct}%)...`,
+            stage: 'uploading',
+            percentage: Math.min(88, 35 + Math.round(pct * 0.53)),
+            details: `Streaming full-size package to persistent storage (${pct}%)...`,
           }));
         },
       });
 
+      // Step 4: Publishing stage (committing version and updating pointers in Firestore)
+      setUploadProgress({
+        stage: 'publishing',
+        percentage: 92,
+        details: 'Atomically promoting new release and updating public Firestore repository...',
+        verifiedMetadata: metadata,
+      });
+
       const effectiveDownloadUrl =
-        saveResult?.cloudResult?.downloadUrl ||
         appMeta?.externalDownloadUrl?.trim() ||
+        saveResult?.effectiveDownloadUrl ||
+        saveResult?.cloudResult?.downloadUrl ||
+        saveResult?.serverResult?.downloadUrl ||
         `/api/apks/${newVersionId}/download`;
 
       const effectiveApkPath =
+        saveResult?.effectiveStoragePath ||
         saveResult?.cloudResult?.storagePath ||
         `published/${targetAppId}/${newVersionId}/${file.name}`;
 
@@ -1249,11 +1266,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setUploadProgress({
         stage: 'completed',
         percentage: 100,
-        details: `Successfully verified and published version ${metadata.versionName} (v${metadata.versionCode})!`,
+        details: `Successfully published "${updatedAppRecord.name}" v${newVersion.versionName} (${(file.size / (1024 * 1024)).toFixed(2)} MB)!`,
         verifiedMetadata: {
           ...metadata,
           appId: targetAppId,
-          appName: targetApp.name,
+          appName: updatedAppRecord.name,
+          downloadUrl: effectiveDownloadUrl,
         },
       });
 
