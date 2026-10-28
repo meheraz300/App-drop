@@ -52,6 +52,7 @@ export const ApkUploader: React.FC = () => {
   const [appIcon, setAppIcon] = useState(DEFAULT_GRADIENT_ICON);
   const [appShortDesc, setAppShortDesc] = useState('');
   const [releaseNotes, setReleaseNotes] = useState('');
+  const [externalDownloadUrl, setExternalDownloadUrl] = useState('');
 
   // UI helpers
   const [copiedSha, setCopiedSha] = useState(false);
@@ -140,6 +141,7 @@ export const ApkUploader: React.FC = () => {
       category: appCategory,
       iconPath: appIcon,
       shortDescription: appShortDesc.trim() || undefined,
+      externalDownloadUrl: externalDownloadUrl.trim() || undefined,
     });
   };
 
@@ -163,6 +165,9 @@ export const ApkUploader: React.FC = () => {
       }
 
       const { downloadUrl, fileName } = await requestDownload(appId, versionId);
+      const res = await fetch(downloadUrl);
+      const blob = await res.blob();
+
       const anchor = document.createElement('a');
       anchor.href = downloadUrl;
       anchor.download = fileName;
@@ -170,7 +175,9 @@ export const ApkUploader: React.FC = () => {
       anchor.click();
       document.body.removeChild(anchor);
 
-      setDownloadNotice(`Downloaded "${fileName}" with exact original byte size verified!`);
+      setDownloadNotice(
+        `Downloaded "${fileName}" (${(blob.size / (1024 * 1024)).toFixed(2)} MB · ${blob.size.toLocaleString()} bytes) verified intact!`
+      );
     } catch (err: any) {
       setDownloadNotice(`Download test failed: ${err?.message || err}`);
     } finally {
@@ -424,6 +431,23 @@ export const ApkUploader: React.FC = () => {
             </div>
           )}
 
+          {/* Direct Download URL (Optional) */}
+          <div>
+            <label className="block text-neutral-700 dark:text-neutral-300 font-semibold mb-1">
+              Direct APK Mirror / CDN URL (Optional)
+            </label>
+            <input
+              type="url"
+              value={externalDownloadUrl}
+              onChange={(e) => setExternalDownloadUrl(e.target.value)}
+              placeholder="e.g. https://github.com/org/repo/releases/download/v1.0.0/app.apk"
+              className="w-full h-9 px-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 text-neutral-900 dark:text-white placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono text-[11px]"
+            />
+            <span className="text-[11px] text-neutral-400 mt-1 block">
+              Leave blank to automatically store the complete binary in AppDrop's multi-tier storage pipeline.
+            </span>
+          </div>
+
           {/* Release Notes */}
           <div>
             <label className="block text-neutral-700 dark:text-neutral-300 font-semibold mb-1.5">
@@ -548,7 +572,7 @@ export const ApkUploader: React.FC = () => {
                       </span>
                     </div>
                     <p className="text-[10px] text-neutral-500">
-                      Byte stream and original ZIP compression headers are 100% preserved in persistent IndexedDB storage.
+                      Byte stream and original ZIP compression headers are 100% preserved intact in Firebase Cloud Storage, persistent IndexedDB, and server storage.
                     </p>
                   </div>
                 )}

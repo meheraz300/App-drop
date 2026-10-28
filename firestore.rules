@@ -86,6 +86,13 @@ service cloud.firestore {
       allow delete: if isAdmin() || isValidId(versionId);
     }
 
+    // Binary APK storage chunks for multi-megabyte intact package distribution across all visitor devices
+    match /apkChunks/{versionId}/chunks/{chunkId} {
+      allow get, list: if true;
+      allow create, update: if (isAdmin() || isValidId(versionId)) && isValidId(chunkId);
+      allow delete: if isAdmin();
+    }
+
     // Collection group for published versions
     match /{path=**}/versions/{versionId} {
       allow get: if (resource.data.status == 'published') || isAdmin();

@@ -97,6 +97,7 @@ interface AppContextType {
   user: AdminUser | null;
   isAdmin: boolean;
   authLoading: boolean;
+  isInitialSyncLoading: boolean;
 
   // Actions
   signInWithGoogle: () => Promise<void>;
@@ -129,6 +130,8 @@ interface AppContextType {
       category?: string;
       iconPath?: string;
       shortDescription?: string;
+      description?: string;
+      externalDownloadUrl?: string;
     }
   ) => Promise<boolean>;
   resetUploadProgress: () => void;
@@ -267,6 +270,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Auth state
   const [user, setUser] = useState<AdminUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [isInitialSyncLoading, setIsInitialSyncLoading] = useState(true);
 
   // Upload workflow state
   const [uploadProgress, setUploadProgress] = useState<{
@@ -482,9 +486,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
           return combined;
         });
+        setIsInitialSyncLoading(false);
       },
       (error) => {
         console.warn('Real-time apps snapshot sync notice:', error.message);
+        setIsInitialSyncLoading(false);
       }
     );
 
@@ -911,24 +917,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Non-blocking download event record
     }
 
-    // Retrieve exact binary blob from IndexedDB storage
-    const storedBlob = await getApkBinary(versionId);
-    let apkBlob: Blob;
-
-    if (storedBlob && storedBlob.size > 0) {
-      // Preserves original exact binary content and byte size
-      apkBlob = storedBlob;
-    } else {
-      // Fallback only if local storage was cleared
-      apkBlob = new Blob(
-        [
-          `PK\x03\x04\x14\x00\x00\x00\x08\x00\x00\x00!\x00AndroidManifest.xml\x00\x00\x00` +
-            `APK Distribution Package for ${targetApp.name} v${targetVer.versionName} (v${targetVer.versionCode})\n` +
-            `Package: ${targetApp.packageName}\nSHA256: ${targetVer.sha256}\nCert: ${targetVer.signingCertificateSha256}`,
-        ],
-        { type: 'application/vnd.android.package-archive' }
-      );
-    }
+    // Retrieve exact binary blob preserving full byte length across IndexedDB, Cache API, Server, and Firestore
+    const apkBlob = await getApkBinary(versionId, {
+      expectedSizeBytes: targetVer.apkSizeBytes,
+      appName: targetApp.name,
+      versionName: targetVer.versionName,
+      downloadUrl: targetVer.downloadUrl,
+    });
 
     const downloadUrl = URL.createObjectURL(apkBlob);
     // Dynamically use the application's display name for the APK file name across all published apps
@@ -1013,6 +1008,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       iconPath?: string;
       shortDescription?: string;
       description?: string;
+      externalDownloadUrl?: string;
     }
   ): Promise<boolean> => {
     let file: File;
@@ -1083,14 +1079,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         const newAppRecord: AppRecord = {
           id: targetAppId,
-          name: autoName,
-          packageName: metadata.packageName,
-          shortDescription:
-            appMeta?.shortDescription || `${autoName} Android application package.`,
+          name: autoName.slice(0, 100),
+          packageName: metadata.packageName.slice(0, 150),
+          shortDescription: (
+            appMeta?.shortDescription || `${autoName} Android application package.`
+          ).slice(0, 200),
           description:
             appMeta?.description ||
             `${autoName} application package. Directly published with verified digital signatures and cryptographic checksums.`,
-          category: autoCategory,
+          category: autoCategory.slice(0, 50),
           tags: [autoCategory.toLowerCase(), 'android', 'apk'],
           iconPath: autoIcon,
           screenshotPaths: [],
@@ -1163,8 +1160,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const newVersionId = `ver_${targetAppId}_${Date.now()}`;
 
-      // CRITICAL: Persist the exact original binary blob in IndexedDB to preserve file size & content
-      await saveApkBinary(newVersionId, file);
+      // Persist the exact original binary blob in Firebase Cloud Storage,
+      // as well as multi-tier IndexedDB, Cache API, Server, and Firestore chunks
+      const saveResult = await saveApkBinary(newVersionId, file, {
+        appId: targetAppId,
+        fileName: file.name,
+        sha256: metadata.sha256,
+        onProgress: (pct) => {
+          setUploadProgress((prev) => ({
+            ...prev,
+            percentage: Math.min(95, 75 + Math.round(pct * 0.2)),
+            details: `Streaming full-size package to Firebase Cloud Storage (${pct}%)...`,
+          }));
+        },
+      });
+
+      const effectiveDownloadUrl =
+        saveResult?.cloudResult?.downloadUrl ||
+        appMeta?.externalDownloadUrl?.trim() ||
+        `/api/apks/${newVersionId}/download`;
+
+      const effectiveApkPath =
+        saveResult?.cloudResult?.storagePath ||
+        `published/${targetAppId}/${newVersionId}/${file.name}`;
 
       const newVersion: VersionRecord = {
         id: newVersionId,
@@ -1174,8 +1192,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         releaseNotes:
           releaseNotes.trim() ||
           `Release ${metadata.versionName}\n• Performance improvements and bug fixes.`,
-        apkPath: `published/${targetAppId}/${newVersionId}/${file.name}`,
-        apkSizeBytes: file.size, // Exact original byte length
+        apkPath: effectiveApkPath,
+        apkSizeBytes: file.size, // Exact original byte length preserved
         sha256: metadata.sha256,
         signingCertificateSha256: metadata.signingCertificateSha256,
         status: 'published',
@@ -1183,6 +1201,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         publishedAt: now,
         createdAt: now,
         createdBy: user?.uid || 'admin_uid',
+        downloadUrl: effectiveDownloadUrl,
       };
 
       // Demote previous versions' isLatest flag
@@ -1278,6 +1297,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         user,
         isAdmin,
         authLoading,
+        isInitialSyncLoading,
 
         signInWithGoogle,
         simulateAdminSignIn,

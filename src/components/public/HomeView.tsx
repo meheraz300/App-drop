@@ -43,6 +43,7 @@ export const HomeView: React.FC = () => {
     user,
     theme,
     toggleTheme,
+    isInitialSyncLoading,
   } = useApp();
 
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
@@ -227,6 +228,18 @@ export const HomeView: React.FC = () => {
             );
           })}
         </div>
+      ) : isInitialSyncLoading && publicApps.length === 0 ? (
+        <GlassSurface variant="card" className="py-20 text-center p-8 space-y-4 rounded-[28px]">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-white/30 dark:bg-white/10 text-[var(--lg-accent-start)] border border-white/40 shadow-xs">
+            <Sparkles className="h-7 w-7 animate-pulse" />
+          </div>
+          <h3 className="text-lg font-bold text-[var(--lg-ink)]">
+            Syncing Published Applications...
+          </h3>
+          <p className="text-sm text-[var(--lg-ink-muted)] max-w-md mx-auto leading-relaxed">
+            Connecting in real-time to the public Firestore repository to retrieve the latest verified APK releases.
+          </p>
+        </GlassSurface>
       ) : publicApps.length === 0 ? (
         /* B12. Empty State: one Surface card, centered Body text in inkMuted, one clear next step */
         <GlassSurface variant="card" className="py-20 text-center p-8 space-y-4 rounded-[28px]">

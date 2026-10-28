@@ -62,6 +62,7 @@ export interface VersionRecord {
   publishedAt: string | null;
   createdAt: string;
   createdBy: string;
+  downloadUrl?: string;
 }
 
 export interface UploadSession {

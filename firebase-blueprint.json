@@ -119,6 +119,22 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["maintenanceMode", "maxUploadSizeBytes", "updatedAt"]
+    },
+    "ApkChunk": {
+      "title": "ApkChunk",
+      "description": "Binary storage chunk for intact Android APK distribution",
+      "type": "object",
+      "properties": {
+        "versionId": { "type": "string", "maxLength": 128 },
+        "chunkIndex": { "type": "number" },
+        "totalChunks": { "type": "number" },
+        "chunkSizeBytes": { "type": "number" },
+        "totalSizeBytes": { "type": "number" },
+        "sha256": { "type": "string", "maxLength": 64 },
+        "data": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["versionId", "chunkIndex", "totalChunks", "chunkSizeBytes", "totalSizeBytes", "data", "createdAt"]
     }
   },
   "firestore": {
@@ -133,6 +149,10 @@
     "/versions/{versionId}": {
       "schema": { "$ref": "#/entities/AppVersion" },
       "description": "Top-level version records for direct real-time sync across applications"
+    },
+    "/apkChunks/{versionId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/ApkChunk" },
+      "description": "Binary APK file chunks stored for cross-device retrieval"
     },
     "/uploadSessions/{sessionId}": {
       "schema": { "$ref": "#/entities/UploadSession" },

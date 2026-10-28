@@ -12,7 +12,7 @@ import { GlassSurface, GlassButton, GlassTag } from '../common/GlassComponents';
 import { formatApkDownloadFileName } from '../../lib/downloadHelper';
 
 export const AppDetailsView: React.FC = () => {
-  const { apps, versions, selectedAppId, navigateTo, requestDownload } = useApp();
+  const { apps, versions, selectedAppId, navigateTo, requestDownload, isInitialSyncLoading } = useApp();
 
   const [downloadingVersionId, setDownloadingVersionId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
@@ -23,6 +23,20 @@ export const AppDetailsView: React.FC = () => {
   const app = apps.find((a) => a.id === selectedAppId);
 
   if (!app) {
+    if (isInitialSyncLoading) {
+      return (
+        <div className="py-20 text-center space-y-4 max-w-lg mx-auto">
+          <GlassSurface variant="card" className="p-8 space-y-4 text-center rounded-[28px]">
+            <Loader2 className="h-8 w-8 animate-spin mx-auto text-[var(--lg-accent-start)]" />
+            <h2 className="text-lg font-bold text-[var(--lg-ink)]">Retrieving Application Details...</h2>
+            <p className="text-sm text-[var(--lg-ink-muted)]">
+              Fetching verified release metadata from the public Firestore repository in real-time.
+            </p>
+          </GlassSurface>
+        </div>
+      );
+    }
+
     return (
       <div className="py-20 text-center space-y-4 max-w-lg mx-auto">
         <GlassSurface variant="card" className="p-8 space-y-4 text-center rounded-[28px]">

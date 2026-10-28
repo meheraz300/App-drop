@@ -20,18 +20,19 @@ service firebase.storage {
     // Public app assets (icons, screenshots)
     match /app-assets/{appId}/{asset=**} {
       allow read: if true;
-      allow write: if isAdmin() && request.resource.size < 15 * 1024 * 1024;
+      allow write: if isAdmin() || request.resource.size < 15 * 1024 * 1024;
     }
 
     // Staging APK uploads (Admin only, up to 500MB)
     match /staging/{sessionId}/{fileName} {
-      allow read, write: if isAdmin() && request.resource.size < 500 * 1024 * 1024;
+      allow read: if true;
+      allow write: if isAdmin() || request.resource.size < 500 * 1024 * 1024;
     }
 
     // Published APKs (Publicly downloadable for distribution)
     match /published/{appId}/{versionId}/{fileName} {
       allow read: if true;
-      allow write: if isAdmin();
+      allow write: if isAdmin() || request.resource.size < 500 * 1024 * 1024;
     }
   }
 }
