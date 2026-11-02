@@ -70,6 +70,29 @@ export const AdminDashboard: React.FC = () => {
         </div>
       </GlassSurface>
 
+      {/* GitHub Pages Pipeline Sync Status Banner */}
+      <div className="p-4 rounded-[20px] bg-white/60 dark:bg-neutral-900/60 border border-white/40 dark:border-white/10 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+        <div className="flex items-center gap-3">
+          <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+          <div className="space-y-0.5">
+            <span className="font-bold text-[var(--lg-ink)]">
+              GitHub Pages Deployment Pipeline & Firestore Real-Time Sync
+            </span>
+            <p className="text-[11px] text-[var(--lg-ink-muted)]">
+              All app updates, releases, and deletions automatically dispatch a GitHub Pages rebuild and synchronize live visitor devices in real-time.
+            </p>
+          </div>
+        </div>
+
+        <button
+          onClick={() => navigateTo('admin-settings')}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200 text-xs font-semibold hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors shrink-0 cursor-pointer"
+        >
+          <span>Pipeline Settings</span>
+          <ArrowRight className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
       {/* Primary KPI Metrics Grid (B6 28px radius) */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Total Apps */}

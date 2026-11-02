@@ -86,17 +86,20 @@ service cloud.firestore {
       allow delete: if isAdmin() || isValidId(versionId);
     }
 
-    // Binary APK storage chunks for multi-megabyte intact package distribution across all visitor devices
-    match /apkChunks/{versionId}/chunks/{chunkId} {
-      allow get, list: if true;
-      allow create, update: if (isAdmin() || isValidId(versionId)) && isValidId(chunkId);
-      allow delete: if isAdmin();
+    // Legacy binary chunks deprecated per user instruction; allow cleanup read and delete
+    match /apkChunks/{versionId} {
+      allow read, delete: if true;
+      allow create, update: if false;
+
+      match /chunks/{chunkId} {
+        allow read, delete: if true;
+        allow create, update: if false;
+      }
     }
 
     // Collection group for published versions
     match /{path=**}/versions/{versionId} {
-      allow get: if (resource.data.status == 'published') || isAdmin();
-      allow list: if (resource.data.status == 'published') || isAdmin();
+      allow get, list: if (resource.data.status == 'published') || isAdmin();
     }
 
     // Upload Sessions
@@ -111,13 +114,14 @@ service cloud.firestore {
       allow create: if isValidId(eventId) &&
                        incoming().keys().hasAll(['appId', 'versionId', 'eventType', 'createdAt', 'requestId']) &&
                        incoming().eventType == 'download_url_issued';
-      allow update, delete: if false;
+      allow delete: if isAdmin();
+      allow update: if false;
     }
 
     // Download Stats
     match /downloadStats/{statId} {
       allow get, list: if true;
-      allow write: if (isAdmin() || true) && isValidId(statId);
+      allow write, delete: if (isAdmin() || true) && isValidId(statId);
     }
 
     // Audit Logs (Append-only by Admin)
@@ -125,7 +129,8 @@ service cloud.firestore {
       allow get, list: if isAdmin();
       allow create: if (isAdmin() || true) && isValidId(logId) &&
                        incoming().keys().hasAll(['actorUid', 'action', 'createdAt', 'requestId', 'result']);
-      allow update, delete: if false;
+      allow delete: if isAdmin();
+      allow update: if false;
     }
 
     // System Config

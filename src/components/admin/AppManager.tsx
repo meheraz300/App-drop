@@ -529,7 +529,7 @@ export const AppManager: React.FC = () => {
 
             <p className="text-xs text-neutral-600 dark:text-neutral-400 leading-relaxed">
               This action is <span className="font-bold text-red-600">irreversible</span>. You are about to permanently purge{' '}
-              <span className="font-semibold text-neutral-900 dark:text-white">"{deletingApp.name}"</span> and all associated storage objects.
+              <span className="font-semibold text-neutral-900 dark:text-white">"{deletingApp.name}"</span>. All corresponding APK binary files will be permanently erased from Firebase Cloud Storage and server storage to immediately free up your project storage quotas.
             </p>
 
             {/* Impact Details */}
