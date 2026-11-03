@@ -99,3 +99,38 @@ test('uploadApkToCloudStorage handles mock environment gracefully without crashi
   // In pure node environment without live browser network session, should return null safely without throwing uncaught errors
   assert.ok(result === null || typeof result?.downloadUrl === 'string');
 });
+
+test('buildBinaryAndroidManifest produces genuine compiled Android binary XML (AXML) with 0x00080003 magic', async () => {
+  const { buildBinaryAndroidManifest, generateIntactApkUint8Array } = await import('./binaryStorage');
+  const axml = buildBinaryAndroidManifest('com.example.app', 42, '2.1.0', 'Example App');
+
+  // Verify AXML Header
+  assert.ok(axml.length > 100, 'AXML buffer must be non-trivial');
+  const view = new DataView(axml.buffer, axml.byteOffset, axml.byteLength);
+  const chunkType = view.getUint16(0, true);
+  const headerSize = view.getUint16(2, true);
+  const chunkSize = view.getUint32(4, true);
+
+  assert.equal(chunkType, 0x0003, 'AXML chunk type must be 0x0003 (RES_XML_TYPE)');
+  assert.equal(headerSize, 8, 'AXML header size must be 8 bytes');
+  assert.equal(chunkSize, axml.length, 'Chunk size in header must equal total buffer length');
+
+  // Verify string pool starts right after header
+  const spType = view.getUint16(8, true);
+  assert.equal(spType, 0x0001, 'First child chunk must be RES_STRING_POOL_TYPE (0x0001)');
+
+  // Verify intact APK embeds this AXML and DEX magic
+  const apkBytes = generateIntactApkUint8Array('Example App', '2.1.0', 1024 * 1024, 'com.example.app');
+  assert.equal(apkBytes.length, 1024 * 1024);
+
+  // Check for DEX magic 'dex\n035\0'
+  const dexMagic = [0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x35, 0x00];
+  let dexFound = false;
+  for (let i = 0; i < apkBytes.length - 8; i++) {
+    if (dexMagic.every((byte, idx) => apkBytes[i + idx] === byte)) {
+      dexFound = true;
+      break;
+    }
+  }
+  assert.equal(dexFound, true, 'Intact APK must embed valid DEX byte header to prevent Android PackageParser errors');
+});

@@ -77,7 +77,7 @@ export const AppDetailsView: React.FC = () => {
         });
       }, 160);
 
-      const { downloadUrl, fileName } = await requestDownload(app.id, versionId);
+      const { downloadUrl, fileName, directStreamUrl } = await requestDownload(app.id, versionId);
 
       // Finish progress animation
       clearInterval(progressTimer);
@@ -89,8 +89,10 @@ export const AppDetailsView: React.FC = () => {
         const resolvedFileName =
           fileName || formatApkDownloadFileName(app.name, targetVer?.versionName);
         const anchor = document.createElement('a');
-        anchor.href = downloadUrl;
+        anchor.href = directStreamUrl || downloadUrl;
         anchor.download = resolvedFileName;
+        anchor.setAttribute('target', '_blank');
+        anchor.setAttribute('rel', 'noopener noreferrer');
         document.body.appendChild(anchor);
         anchor.click();
         document.body.removeChild(anchor);

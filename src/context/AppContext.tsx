@@ -119,7 +119,10 @@ interface AppContextType {
   deleteApp: (appId: string) => Promise<void>;
   rollbackVersion: (appId: string, targetVersionId: string) => Promise<{ success: boolean; error?: string }>;
   updateReleaseNotes: (versionId: string, releaseNotes: string) => Promise<void>;
-  requestDownload: (appId: string, versionId: string) => Promise<{ downloadUrl: string; fileName: string }>;
+  requestDownload: (
+    appId: string,
+    versionId: string
+  ) => Promise<{ downloadUrl: string; fileName: string; directStreamUrl?: string; blob?: Blob }>;
   updateSystemConfig: (updates: Partial<SystemConfig>) => Promise<void>;
   purgeAllStorage: () => Promise<{ cloudDeleted: number; serverDeleted: number; serverFreedBytes: number }>;
   triggerManualDeploy: () => Promise<{ success: boolean; message: string }>;
@@ -1074,7 +1077,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Dynamically use the application's display name for the APK file name across all published apps
     const fileName = formatApkDownloadFileName(targetApp.name, targetVer.versionName);
 
-    return { downloadUrl, fileName };
+    const basePath =
+      typeof window !== 'undefined' && window.location.pathname.startsWith('/App-drop')
+        ? '/App-drop'
+        : '';
+    const directStreamUrl =
+      targetVer.downloadUrl && targetVer.downloadUrl.startsWith('https://')
+        ? targetVer.downloadUrl
+        : `${basePath}/api/apks/${versionId}/download?name=${encodeURIComponent(fileName)}&appName=${encodeURIComponent(targetApp.name)}&versionName=${encodeURIComponent(targetVer.versionName)}&size=${targetVer.apkSizeBytes || 0}&package=${encodeURIComponent(targetApp.packageName || 'com.appdrop.package')}`;
+
+    return { downloadUrl, fileName, directStreamUrl, blob: apkBlob };
   };
 
   const updateSystemConfig = async (updates: Partial<SystemConfig>) => {
