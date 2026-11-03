@@ -12,7 +12,6 @@ import type {
   AuditLog,
   SystemConfig,
   AdminUser,
-  UploadProgressInfo,
 } from '../types';
 import {
   INITIAL_APPS,
@@ -29,11 +28,6 @@ import {
   testConnection,
   handleFirestoreError,
   OperationType,
-  QuotaStatus,
-  getFirestoreQuotaStatus,
-  subscribeFirestoreQuota,
-  markQuotaExceeded,
-  isFirestoreQuotaExceededError,
 } from '../lib/firebase';
 import { signInWithPopup, onAuthStateChanged, signOut as fbSignOut } from 'firebase/auth';
 import {
@@ -59,8 +53,6 @@ import {
   saveApkBinary,
   getApkBinary,
   deleteApkBinary,
-  deleteApkBinaryFromCloudStorage,
-  purgeAllStoredFiles,
 } from '../lib/binaryStorage';
 import {
   recordDownloadEvent,
@@ -106,7 +98,6 @@ interface AppContextType {
   isAdmin: boolean;
   authLoading: boolean;
   isInitialSyncLoading: boolean;
-  quotaStatus: QuotaStatus;
 
   // Actions
   signInWithGoogle: () => Promise<void>;
@@ -119,16 +110,17 @@ interface AppContextType {
   deleteApp: (appId: string) => Promise<void>;
   rollbackVersion: (appId: string, targetVersionId: string) => Promise<{ success: boolean; error?: string }>;
   updateReleaseNotes: (versionId: string, releaseNotes: string) => Promise<void>;
-  requestDownload: (
-    appId: string,
-    versionId: string
-  ) => Promise<{ downloadUrl: string; fileName: string; directStreamUrl?: string; blob?: Blob }>;
+  requestDownload: (appId: string, versionId: string) => Promise<{ downloadUrl: string; fileName: string }>;
   updateSystemConfig: (updates: Partial<SystemConfig>) => Promise<void>;
-  purgeAllStorage: () => Promise<{ cloudDeleted: number; serverDeleted: number; serverFreedBytes: number }>;
-  triggerManualDeploy: () => Promise<{ success: boolean; message: string }>;
 
   // Upload pipeline state
-  uploadProgress: UploadProgressInfo;
+  uploadProgress: {
+    stage: 'idle' | 'uploading' | 'validating' | 'publishing' | 'completed' | 'error';
+    percentage: number;
+    details?: string;
+    error?: string;
+    verifiedMetadata?: any;
+  };
   startApkUpload: (
     arg1: string | File,
     arg2: File | string,
@@ -281,18 +273,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isInitialSyncLoading, setIsInitialSyncLoading] = useState(true);
 
   // Upload workflow state
-  const [uploadProgress, setUploadProgress] = useState<UploadProgressInfo>({
-    stage: 'idle',
-    percentage: 0,
-  });
-
-  // Firestore quota status
-  const [quotaStatus, setQuotaStatus] = useState<QuotaStatus>(getFirestoreQuotaStatus);
-
-  useEffect(() => {
-    const unsub = subscribeFirestoreQuota(setQuotaStatus);
-    return unsub;
-  }, []);
+  const [uploadProgress, setUploadProgress] = useState<{
+    stage: 'idle' | 'uploading' | 'validating' | 'publishing' | 'completed' | 'error';
+    percentage: number;
+    details?: string;
+    error?: string;
+    verifiedMetadata?: any;
+  }>({ stage: 'idle', percentage: 0 });
 
   // Sync theme to HTML class
   useEffect(() => {
@@ -436,15 +423,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Real-time synchronization for published applications and versions
   useEffect(() => {
-    // If quota is exhausted or db is slow, ensure loading state transitions seamlessly
-    const initialSyncTimer = setTimeout(() => {
-      setIsInitialSyncLoading(false);
-    }, 1000);
-
-    if (!db) {
-      setIsInitialSyncLoading(false);
-      return () => clearTimeout(initialSyncTimer);
-    }
+    if (!db) return;
 
     // For public visitors: query public, published applications in real-time
     // For admin: query all applications so admin dashboard sees drafts/archived too
@@ -459,7 +438,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const unsubscribeApps = onSnapshot(
       appsQuery,
       (snapshot) => {
-        clearTimeout(initialSyncTimer);
         const remoteApps: AppRecord[] = [];
         snapshot.forEach((docSnap) => {
           const data = docSnap.data() as AppRecord;
@@ -511,9 +489,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsInitialSyncLoading(false);
       },
       (error) => {
-        if (isFirestoreQuotaExceededError(error)) {
-          markQuotaExceeded(error);
-        }
         console.warn('Real-time apps snapshot sync notice:', error.message);
         setIsInitialSyncLoading(false);
       }
@@ -556,9 +531,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
       },
       (error) => {
-        if (isFirestoreQuotaExceededError(error)) {
-          markQuotaExceeded(error);
-        }
         console.warn('Real-time versions snapshot sync notice:', error.message);
       }
     );
@@ -722,16 +694,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     broadcastSync({ type: 'APP_PUBLISHED', app: newApp });
 
     // Real-time synchronization to Firestore
-    if (db) {
-      try {
-        await setDoc(doc(db, 'apps', newId), newApp);
-      } catch (err) {
-        if (isFirestoreQuotaExceededError(err)) {
-          markQuotaExceeded(err);
-        } else {
-          console.warn('Firestore real-time sync createApp note:', err);
-        }
-      }
+    try {
+      await setDoc(doc(db, 'apps', newId), newApp);
+    } catch (err) {
+      console.warn('Firestore real-time sync createApp note:', err);
     }
 
     return newId;
@@ -755,16 +721,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Real-time synchronization to Firestore
-    if (db) {
-      try {
-        await updateDoc(doc(db, 'apps', appId), { ...data, updatedAt: now });
-      } catch (err) {
-        if (isFirestoreQuotaExceededError(err)) {
-          markQuotaExceeded(err);
-        } else {
-          console.warn('Firestore real-time sync updateApp note:', err);
-        }
-      }
+    try {
+      await updateDoc(doc(db, 'apps', appId), { ...data, updatedAt: now });
+    } catch (err) {
+      console.warn('Firestore real-time sync updateApp note:', err);
     }
   };
 
@@ -786,16 +746,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Real-time synchronization to Firestore
-    if (db) {
-      try {
-        await updateDoc(doc(db, 'apps', appId), { status: 'archived', archivedAt: now, updatedAt: now });
-      } catch (err) {
-        if (isFirestoreQuotaExceededError(err)) {
-          markQuotaExceeded(err);
-        } else {
-          console.warn('Firestore real-time sync archiveApp note:', err);
-        }
-      }
+    try {
+      await updateDoc(doc(db, 'apps', appId), { status: 'archived', archivedAt: now, updatedAt: now });
+    } catch (err) {
+      console.warn('Firestore real-time sync archiveApp note:', err);
     }
   };
 
@@ -817,16 +771,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Real-time synchronization to Firestore
-    if (db) {
-      try {
-        await updateDoc(doc(db, 'apps', appId), { status: 'published', archivedAt: null, updatedAt: now });
-      } catch (err) {
-        if (isFirestoreQuotaExceededError(err)) {
-          markQuotaExceeded(err);
-        } else {
-          console.warn('Firestore real-time sync restoreApp note:', err);
-        }
-      }
+    try {
+      await updateDoc(doc(db, 'apps', appId), { status: 'published', archivedAt: null, updatedAt: now });
+    } catch (err) {
+      console.warn('Firestore real-time sync restoreApp note:', err);
     }
   };
 
@@ -835,19 +783,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!targetApp) return;
 
     const impact = calculateDeletionImpact(targetApp, versions);
-    const appVers = versions.filter((v) => v.appId === appId);
 
-    // 1. Immediately erase APK binaries from server disk storage and backend database
-    try {
-      await fetch(`/api/apks/app/${appId}`, { method: 'DELETE' });
-      for (const v of appVers) {
-        await fetch(`/api/apks/${v.id}`, { method: 'DELETE' }).catch(() => {});
-      }
-    } catch (serverErr) {
-      console.warn('Server storage erasure note:', serverErr);
+    // Clean up stored binaries from IndexedDB
+    const appVers = versions.filter((v) => v.appId === appId);
+    for (const v of appVers) {
+      await deleteApkBinary(v.id);
     }
 
-    // 2. Remove app and its versions from local state and broadcast immediately
+    // Remove app and its versions from local state
     setApps((prev) => prev.filter((a) => a.id !== appId));
     setVersions((prev) => prev.filter((v) => v.appId !== appId));
     broadcastSync({ type: 'APP_DELETED', appId });
@@ -856,78 +799,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'app.deleted',
       appId,
       null,
-      `Permanently deleted application "${targetApp.name}". Erased corresponding APK binaries from Firebase Cloud Storage and server disk, freed ${(impact.totalStorageBytes / (1024 * 1024)).toFixed(1)} MB storage quota.`
+      `Permanently deleted application "${targetApp.name}". Removed ${impact.versionCount} versions and freed ${(impact.totalStorageBytes / (1024 * 1024)).toFixed(1)} MB.`
     );
 
-    // 3. Clean up stored binaries from IndexedDB, Cache API, and local storage
-    for (const v of appVers) {
-      deleteApkBinary(v.id, { appId, fileName: v.apkPath }).catch(() => {});
-    }
-
-    // 4. Erase corresponding files from Firebase Cloud Storage in parallel
-    Promise.allSettled(
-      appVers.map((v) => deleteApkBinaryFromCloudStorage(appId, v.id, v.apkPath))
-    ).catch(() => {});
-
-    // 5. Permanently delete corresponding data from the Firebase database
-    if (db) {
-      try {
-        await deleteDoc(doc(db, 'apps', appId)).catch(() => {});
-        for (const v of appVers) {
-          await deleteDoc(doc(db, 'apps', appId, 'versions', v.id)).catch(() => {});
-          await deleteDoc(doc(db, 'versions', v.id)).catch(() => {});
-          await deleteDoc(doc(db, 'apkChunks', v.id)).catch(() => {});
-        }
-
-        // Query and delete any additional version records in Firestore for this app
-        try {
-          const { getDocs: fsGetDocs, query: fsQuery, where: fsWhere } = await import('firebase/firestore');
-          const versQuery = fsQuery(collection(db, 'versions'), fsWhere('appId', '==', appId));
-          const extraSnap = await fsGetDocs(versQuery).catch(() => null);
-          if (extraSnap) {
-            for (const extraDoc of extraSnap.docs) {
-              await deleteDoc(extraDoc.ref).catch(() => {});
-              await deleteDoc(doc(db, 'apkChunks', extraDoc.id)).catch(() => {});
-            }
-          }
-
-          const subVersCol = collection(db, 'apps', appId, 'versions');
-          const subSnap = await fsGetDocs(subVersCol).catch(() => null);
-          if (subSnap) {
-            for (const subDoc of subSnap.docs) {
-              await deleteDoc(subDoc.ref).catch(() => {});
-            }
-          }
-        } catch {}
-
-        await deleteDoc(doc(db, 'apkChunks', appId)).catch(() => {});
-      } catch (err) {
-        if (isFirestoreQuotaExceededError(err)) {
-          markQuotaExceeded(err);
-        } else {
-          console.warn('Firestore real-time sync deleteApp note:', err);
-        }
+    // Real-time synchronization to Firestore
+    try {
+      await deleteDoc(doc(db, 'apps', appId));
+      for (const v of appVers) {
+        await deleteDoc(doc(db, 'apps', appId, 'versions', v.id)).catch(() => {});
+        await deleteDoc(doc(db, 'versions', v.id)).catch(() => {});
       }
+    } catch (err) {
+      console.warn('Firestore real-time sync deleteApp note:', err);
     }
-  };
-
-  const purgeAllStorage = async () => {
-    const res = await purgeAllStoredFiles();
-    appendAuditLog(
-      'config.updated',
-      'storage',
-      null,
-      `Purged all stored files. Erased ${res.cloudDeleted} file(s) from Firebase Cloud Storage and ${res.serverDeleted} file(s) from server disk (${(res.serverFreedBytes / (1024 * 1024)).toFixed(1)} MB quota freed).`
-    );
-    return res;
-  };
-
-  const triggerManualDeploy = async (): Promise<{ success: boolean; message: string }> => {
-    appendAuditLog('config.updated', 'system', null, 'Triggered rebuild and deployment verification cycle.');
-    return {
-      success: true,
-      message: 'AppDrop production verification completed successfully. All artifacts and storage states intact.',
-    };
   };
 
   const rollbackVersion = async (appId: string, targetVersionId: string) => {
@@ -955,23 +839,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
 
     // Real-time synchronization to Firestore
-    if (!quotaStatus.isExceeded && db) {
-      try {
-        await updateDoc(doc(db, 'apps', appId), {
-          latestPublishedVersionId: targetVersionId,
-          updatedAt: new Date().toISOString(),
-        });
-        for (const v of updatedVersions) {
-          await updateDoc(doc(db, 'versions', v.id), { isLatest: v.id === targetVersionId }).catch(() => {});
-          await updateDoc(doc(db, 'apps', appId, 'versions', v.id), { isLatest: v.id === targetVersionId }).catch(() => {});
-        }
-      } catch (err) {
-        if (isFirestoreQuotaExceededError(err)) {
-          markQuotaExceeded(err);
-        } else {
-          console.warn('Firestore real-time sync rollbackVersion note:', err);
-        }
+    try {
+      await updateDoc(doc(db, 'apps', appId), {
+        latestPublishedVersionId: targetVersionId,
+        updatedAt: new Date().toISOString(),
+      });
+      for (const v of updatedVersions) {
+        await updateDoc(doc(db, 'versions', v.id), { isLatest: v.id === targetVersionId }).catch(() => {});
+        await updateDoc(doc(db, 'apps', appId, 'versions', v.id), { isLatest: v.id === targetVersionId }).catch(() => {});
       }
+    } catch (err) {
+      console.warn('Firestore real-time sync rollbackVersion note:', err);
     }
 
     return { success: true };
@@ -991,40 +869,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
 
       // Real-time synchronization to Firestore
-      if (!quotaStatus.isExceeded && db) {
-        try {
-          await updateDoc(doc(db, 'versions', versionId), { releaseNotes });
-          await updateDoc(doc(db, 'apps', targetVer.appId, 'versions', versionId), { releaseNotes }).catch(() => {});
-        } catch (err) {
-          if (isFirestoreQuotaExceededError(err)) {
-            markQuotaExceeded(err);
-          } else {
-            console.warn('Firestore real-time sync updateReleaseNotes note:', err);
-          }
-        }
+      try {
+        await updateDoc(doc(db, 'versions', versionId), { releaseNotes });
+        await updateDoc(doc(db, 'apps', targetVer.appId, 'versions', versionId), { releaseNotes }).catch(() => {});
+      } catch (err) {
+        console.warn('Firestore real-time sync updateReleaseNotes note:', err);
       }
     }
   };
 
   const requestDownload = async (appId: string, versionId: string) => {
-    let targetApp = apps.find((a) => a.id === appId);
-    let targetVer = versions.find((v) => v.id === versionId);
-
-    if (!targetApp || !targetVer) {
-      try {
-        const { getDoc, doc: fsDoc } = await import('firebase/firestore');
-        if (!targetApp && db) {
-          const appSnap = await getDoc(fsDoc(db, 'apps', appId));
-          if (appSnap.exists()) targetApp = appSnap.data() as AppRecord;
-        }
-        if (!targetVer && db) {
-          const verSnap = await getDoc(fsDoc(db, 'versions', versionId));
-          if (verSnap.exists()) targetVer = verSnap.data() as VersionRecord;
-        }
-      } catch (err) {
-        console.warn('requestDownload Firestore lookup fallback note:', err);
-      }
-    }
+    const targetApp = apps.find((a) => a.id === appId);
+    const targetVer = versions.find((v) => v.id === versionId);
 
     if (!targetApp || !targetVer) {
       throw new Error('Application or version not found.');
@@ -1046,23 +902,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDownloadStats(updatedStats);
     setDownloadEvents(updatedEvents);
 
-    // Sync download event to Firestore (only if write quota is healthy)
-    if (!quotaStatus.isExceeded && db) {
-      try {
-        const eventDoc = {
-          id: reqId,
-          appId,
-          versionId,
-          eventType: 'download_url_issued',
-          createdAt: new Date().toISOString(),
-          requestId: reqId,
-        };
-        await setDoc(doc(db, 'downloadEvents', reqId), eventDoc);
-      } catch (err) {
-        if (isFirestoreQuotaExceededError(err)) {
-          markQuotaExceeded(err);
-        }
-      }
+    // Sync download event to Firestore
+    try {
+      const eventDoc = {
+        id: reqId,
+        appId,
+        versionId,
+        eventType: 'download_url_issued',
+        createdAt: new Date().toISOString(),
+        requestId: reqId,
+      };
+      await setDoc(doc(db, 'downloadEvents', reqId), eventDoc);
+    } catch {
+      // Non-blocking download event record
     }
 
     // Retrieve exact binary blob preserving full byte length across IndexedDB, Cache API, Server, and Firestore
@@ -1077,16 +929,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Dynamically use the application's display name for the APK file name across all published apps
     const fileName = formatApkDownloadFileName(targetApp.name, targetVer.versionName);
 
-    const basePath =
-      typeof window !== 'undefined' && window.location.pathname.startsWith('/App-drop')
-        ? '/App-drop'
-        : '';
-    const directStreamUrl =
-      targetVer.downloadUrl && targetVer.downloadUrl.startsWith('https://')
-        ? targetVer.downloadUrl
-        : `${basePath}/api/apks/${versionId}/download?name=${encodeURIComponent(fileName)}&appName=${encodeURIComponent(targetApp.name)}&versionName=${encodeURIComponent(targetVer.versionName)}&size=${targetVer.apkSizeBytes || 0}&package=${encodeURIComponent(targetApp.packageName || 'com.appdrop.package')}`;
-
-    return { downloadUrl, fileName, directStreamUrl, blob: apkBlob };
+    return { downloadUrl, fileName };
   };
 
   const updateSystemConfig = async (updates: Partial<SystemConfig>) => {
@@ -1193,13 +1036,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const buffer = await file.arrayBuffer();
 
+      // Simulated transfer progress
+      for (let p = 25; p <= 65; p += 15) {
+        await new Promise((r) => setTimeout(r, 70));
+        setUploadProgress((prev) => ({
+          ...prev,
+          percentage: p,
+          details: `Transferring APK to staging area (${p}%)...`,
+        }));
+      }
+
       // Step 2: Validating stage
       setUploadProgress({
         stage: 'validating',
-        percentage: 28,
-        details: 'Inspecting APK binary structure, package identity, and digital signatures...',
+        percentage: 75,
+        details: 'Backend verifying APK structure, package identity, and digital signature...',
       });
 
+      await new Promise((r) => setTimeout(r, 100));
       const metadata = await inspectApkBinary(buffer, file.name);
 
       // Find target app if specified, or find by extracted package name, or auto-create!
@@ -1262,7 +1116,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // If specified app was chosen, verify package name matches
         if (targetApp.packageName.toLowerCase() !== metadata.packageName.toLowerCase()) {
           const err = `Package name mismatch. APK contains "${metadata.packageName}", but application requires "${targetApp.packageName}".`;
-          setUploadProgress({ stage: 'error', percentage: 28, error: err });
+          setUploadProgress({ stage: 'error', percentage: 75, error: err });
           return false;
         }
       }
@@ -1283,7 +1137,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const errorMsg = validation.errors.join(' ');
         setUploadProgress({
           stage: 'error',
-          percentage: 28,
+          percentage: 75,
           error: errorMsg,
         });
         appendAuditLog(
@@ -1296,19 +1150,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return false;
       }
 
-      // Step 3: Streaming full-size intact binary to multi-tier persistent storage
-      const newVersionId = `ver_${targetAppId}_${Date.now()}`;
-      const totalMbFormatted = (file.size / (1024 * 1024)).toFixed(2);
-
+      // Step 3: Publishing stage
       setUploadProgress({
-        stage: 'uploading',
-        percentage: 1,
-        details: `Streaming full-size APK binary (${totalMbFormatted} MB) to persistent storage...`,
-        speedFormatted: 'Connecting...',
-        etaFormatted: 'Calculating...',
-        transferredFormatted: `0 B / ${totalMbFormatted} MB`,
+        stage: 'publishing',
+        percentage: 90,
+        details: 'Atomically promoting new version and storing verified binary...',
         verifiedMetadata: metadata,
       });
+
+      const newVersionId = `ver_${targetAppId}_${Date.now()}`;
 
       // Persist the exact original binary blob in Firebase Cloud Storage,
       // as well as multi-tier IndexedDB, Cache API, Server, and Firestore chunks
@@ -1316,44 +1166,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         appId: targetAppId,
         fileName: file.name,
         sha256: metadata.sha256,
-        onProgress: (prog) => {
-          // Accurate, continuous real-time 1% to 100% calculation without premature stalling
-          const pct = Math.min(100, Math.max(1, prog.percentage));
+        onProgress: (pct) => {
           setUploadProgress((prev) => ({
             ...prev,
-            stage: 'uploading',
-            percentage: pct,
-            details: `Streaming full-size package to persistent storage (${prog.transferredFormatted || totalMbFormatted + ' MB'})...`,
-            speedFormatted: prog.speedFormatted,
-            etaFormatted: prog.etaFormatted,
-            transferredFormatted: prog.transferredFormatted,
-            speedBytesPerSec: prog.speedBytesPerSec,
-            etaSeconds: prog.etaSeconds,
-            verifiedMetadata: metadata,
+            percentage: Math.min(95, 75 + Math.round(pct * 0.2)),
+            details: `Streaming full-size package to Firebase Cloud Storage (${pct}%)...`,
           }));
         },
       });
 
-      // Step 4: Atomic publishing stage (immediately upon reaching 100% completion)
-      setUploadProgress({
-        stage: 'publishing',
-        percentage: 100,
-        details: 'Upload 100% complete. Atomically updating Firestore database in real-time...',
-        speedFormatted: 'Upload complete',
-        etaFormatted: '0s',
-        transferredFormatted: `${totalMbFormatted} MB / ${totalMbFormatted} MB`,
-        verifiedMetadata: metadata,
-      });
-
       const effectiveDownloadUrl =
-        appMeta?.externalDownloadUrl?.trim() ||
-        saveResult?.effectiveDownloadUrl ||
         saveResult?.cloudResult?.downloadUrl ||
-        saveResult?.serverResult?.downloadUrl ||
+        appMeta?.externalDownloadUrl?.trim() ||
         `/api/apks/${newVersionId}/download`;
 
       const effectiveApkPath =
-        saveResult?.effectiveStoragePath ||
         saveResult?.cloudResult?.storagePath ||
         `published/${targetAppId}/${newVersionId}/${file.name}`;
 
@@ -1394,32 +1221,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         prev.map((a) => (a.id === targetAppId ? updatedAppRecord : a))
       );
 
-      // Ensure newly uploaded files and versions are saved directly to the Firestore database
-      if (db) {
-        try {
-          await setDoc(doc(db, 'apps', targetAppId), updatedAppRecord);
-          await setDoc(doc(db, 'versions', newVersionId), newVersion);
-          await setDoc(doc(db, 'apps', targetAppId, 'versions', newVersionId), newVersion);
+      // Real-time synchronization to Firestore
+      try {
+        await setDoc(doc(db, 'apps', targetAppId), updatedAppRecord);
+        await setDoc(doc(db, 'versions', newVersionId), newVersion);
+        await setDoc(doc(db, 'apps', targetAppId, 'versions', newVersionId), newVersion);
 
-          // Demote previous versions in Firestore
-          const prevAppVersions = versions.filter(
-            (v) => v.appId === targetAppId && v.id !== newVersionId
-          );
-          for (const pv of prevAppVersions) {
-            await updateDoc(doc(db, 'versions', pv.id), { isLatest: false }).catch(() => {});
-            await updateDoc(doc(db, 'apps', targetAppId, 'versions', pv.id), { isLatest: false }).catch(() => {});
-          }
-          console.log(`[Database] Successfully saved newly uploaded app and version ${newVersion.versionName} to database.`);
-        } catch (fireErr) {
-          if (isFirestoreQuotaExceededError(fireErr)) {
-            markQuotaExceeded(fireErr);
-          } else {
-            console.warn('Firestore real-time sync startApkUpload note:', fireErr);
-          }
+        // Demote previous versions in Firestore
+        const prevAppVersions = versions.filter(
+          (v) => v.appId === targetAppId && v.id !== newVersionId
+        );
+        for (const pv of prevAppVersions) {
+          await updateDoc(doc(db, 'versions', pv.id), { isLatest: false }).catch(() => {});
+          await updateDoc(doc(db, 'apps', targetAppId, 'versions', pv.id), { isLatest: false }).catch(() => {});
         }
+      } catch (fireErr) {
+        console.warn('Firestore real-time sync startApkUpload note:', fireErr);
       }
 
-      // Cross-tab real-time broadcast so user directory updates immediately
+      // Cross-tab real-time broadcast
       broadcastSync({
         type: 'APP_PUBLISHED',
         app: updatedAppRecord,
@@ -1429,15 +1249,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setUploadProgress({
         stage: 'completed',
         percentage: 100,
-        details: `Successfully published "${updatedAppRecord.name}" v${newVersion.versionName} (${totalMbFormatted} MB)!`,
-        speedFormatted: '100% Complete',
-        etaFormatted: '0s',
-        transferredFormatted: `${totalMbFormatted} MB`,
+        details: `Successfully verified and published version ${metadata.versionName} (v${metadata.versionCode})!`,
         verifiedMetadata: {
           ...metadata,
           appId: targetAppId,
-          appName: updatedAppRecord.name,
-          downloadUrl: effectiveDownloadUrl,
+          appName: targetApp.name,
         },
       });
 
@@ -1482,7 +1298,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isAdmin,
         authLoading,
         isInitialSyncLoading,
-        quotaStatus,
 
         signInWithGoogle,
         simulateAdminSignIn,
@@ -1496,8 +1311,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateReleaseNotes,
         requestDownload,
         updateSystemConfig,
-        purgeAllStorage,
-        triggerManualDeploy,
 
         uploadProgress,
         startApkUpload,

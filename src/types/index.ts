@@ -99,30 +99,6 @@ export interface DownloadStat {
   updatedAt: string;
 }
 
-export interface DeploymentEvent {
-  id: string;
-  event: 'app.published' | 'app.updated' | 'app.deleted' | 'pipeline.manual_trigger';
-  appId?: string;
-  appName?: string;
-  version?: string;
-  triggeredAt: string;
-  actorEmail?: string;
-  status: 'triggered' | 'queued' | 'completed' | 'failed';
-  target: string;
-  details?: string;
-}
-
-export interface DeploymentConfig {
-  autoDeployOnMutation: boolean;
-  githubRepo?: string;
-  githubToken?: string;
-  deployHookUrl?: string;
-  lastTriggeredAt?: string;
-  lastEvent?: string;
-  lastStatus?: string;
-  lastDetails?: string;
-}
-
 export interface AuditLog {
   id: string;
   actorUid: string;
@@ -138,8 +114,7 @@ export interface AuditLog {
     | 'version.published'
     | 'version.rollback'
     | 'maintenance.toggled'
-    | 'config.updated'
-    | 'pipeline.triggered';
+    | 'config.updated';
   appId: string;
   versionId: string | null;
   createdAt: string;
@@ -153,7 +128,6 @@ export interface SystemConfig {
   maintenanceMessage: string;
   maxUploadSizeBytes: number;
   updatedAt: string;
-  deploymentConfig?: DeploymentConfig;
 }
 
 export interface AdminUser {
@@ -176,17 +150,3 @@ export interface ParsedApkMetadata {
   isValidZip: boolean;
   permissions: string[];
 }
-
-export interface UploadProgressInfo {
-  stage: 'idle' | 'uploading' | 'validating' | 'publishing' | 'completed' | 'error';
-  percentage: number;
-  details?: string;
-  error?: string;
-  verifiedMetadata?: any;
-  speedFormatted?: string;
-  etaFormatted?: string;
-  transferredFormatted?: string;
-  speedBytesPerSec?: number;
-  etaSeconds?: number;
-}
-

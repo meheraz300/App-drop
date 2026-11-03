@@ -15,9 +15,6 @@ import {
   FolderPlus,
   Layers,
   Sparkles,
-  Zap,
-  Clock,
-  HardDrive,
 } from 'lucide-react';
 import { IconImageUploader } from '../common/IconImageUploader';
 
@@ -486,38 +483,21 @@ export const ApkUploader: React.FC = () => {
         {/* Progress Pipeline & Validation State Machine */}
         {uploadProgress.stage !== 'idle' && (
           <div className="p-5 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800/40 space-y-4 text-xs">
-            {/* Header Stage & Percentage */}
+            {/* Header Stage */}
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-neutral-900 dark:text-white uppercase tracking-wider text-[11px]">
-                  Pipeline Status: <span className="capitalize">{uploadProgress.stage}</span>
-                </span>
-                {uploadProgress.stage === 'uploading' && (
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-300 animate-pulse">
-                    Streaming intact
-                  </span>
-                )}
-                {uploadProgress.stage === 'publishing' && (
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300 animate-pulse">
-                    Syncing Firestore
-                  </span>
-                )}
-                {uploadProgress.stage === 'completed' && (
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-300">
-                    Published intact
-                  </span>
-                )}
-              </div>
-              <span className="font-mono tabular-nums text-sm font-bold text-neutral-900 dark:text-white">
+              <span className="font-bold text-neutral-900 dark:text-white uppercase tracking-wider text-[11px]">
+                Pipeline Status: <span className="capitalize">{uploadProgress.stage}</span>
+              </span>
+              <span className="font-mono tabular-nums text-neutral-500">
                 {uploadProgress.percentage}%
               </span>
             </div>
 
             {/* Progress Bar */}
-            <div className="w-full h-2.5 rounded-full bg-neutral-200 dark:bg-neutral-700 overflow-hidden shadow-inner">
+            <div className="w-full h-2 rounded-full bg-neutral-200 dark:bg-neutral-700 overflow-hidden">
               <div
                 style={{ width: `${uploadProgress.percentage}%` }}
-                className={`h-full transition-all duration-200 ${
+                className={`h-full transition-all duration-300 ${
                   uploadProgress.stage === 'error'
                     ? 'bg-red-500'
                     : uploadProgress.stage === 'completed'
@@ -527,61 +507,8 @@ export const ApkUploader: React.FC = () => {
               />
             </div>
 
-            {/* Real-time Upload Speed, ETA, and Transferred Indicators */}
-            {(uploadProgress.stage === 'uploading' ||
-              uploadProgress.stage === 'publishing' ||
-              uploadProgress.speedFormatted) && (
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
-                {/* Upload Speed */}
-                <div className="flex items-center gap-2.5 p-2.5 rounded-lg bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 text-[11px] shadow-xs">
-                  <div className="p-1.5 rounded-md bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
-                    <Zap className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="min-w-0">
-                    <span className="text-neutral-400 dark:text-neutral-500 block text-[10px] uppercase font-mono tracking-wider">
-                      Upload Speed
-                    </span>
-                    <span className="font-mono font-semibold text-neutral-800 dark:text-neutral-200 truncate block">
-                      {uploadProgress.speedFormatted || 'Calculating...'}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Estimated Time Remaining (ETA) */}
-                <div className="flex items-center gap-2.5 p-2.5 rounded-lg bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 text-[11px] shadow-xs">
-                  <div className="p-1.5 rounded-md bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400">
-                    <Clock className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="min-w-0">
-                    <span className="text-neutral-400 dark:text-neutral-500 block text-[10px] uppercase font-mono tracking-wider">
-                      Est. Time Remaining
-                    </span>
-                    <span className="font-mono font-semibold text-neutral-800 dark:text-neutral-200 truncate block">
-                      {uploadProgress.etaFormatted || 'Estimating...'}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Transferred Bytes / Total */}
-                <div className="flex items-center gap-2.5 p-2.5 rounded-lg bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 text-[11px] shadow-xs">
-                  <div className="p-1.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
-                    <HardDrive className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="min-w-0">
-                    <span className="text-neutral-400 dark:text-neutral-500 block text-[10px] uppercase font-mono tracking-wider">
-                      Bytes Transferred
-                    </span>
-                    <span className="font-mono font-semibold text-neutral-800 dark:text-neutral-200 truncate block">
-                      {uploadProgress.transferredFormatted ||
-                        (selectedFile ? `${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB` : 'In progress')}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-
             {uploadProgress.details && (
-              <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed font-mono text-[11px]">
+              <p className="text-neutral-600 dark:text-neutral-400 leading-relaxed">
                 {uploadProgress.details}
               </p>
             )}

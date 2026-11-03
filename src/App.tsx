@@ -9,7 +9,6 @@ import { AdProvider } from './context/AdContext';
 import { Navbar } from './components/layout/Navbar';
 import { Footer } from './components/layout/Footer';
 import { MaintenanceBanner } from './components/public/MaintenanceBanner';
-import { QuotaNoticeBanner } from './components/common/QuotaNoticeBanner';
 import { HomeView } from './components/public/HomeView';
 import { AppDetailsView } from './components/public/AppDetailsView';
 import { StaticPages } from './components/public/StaticPages';
@@ -131,7 +130,6 @@ const AppContent: React.FC = () => {
     <div className="min-h-screen flex flex-col bg-transparent text-[var(--lg-ink)] font-sans selection:bg-[var(--lg-accent-start)]/20 selection:text-[var(--lg-accent-start)]">
       <GlassBackdrop />
       <Navbar />
-      <QuotaNoticeBanner />
       <MaintenanceBanner />
       <main className="flex-1 min-w-0">{renderContent()}</main>
       {!isAdminRoute && <Footer />}
