@@ -1,10 +1,25 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { ShieldCheck, ArrowLeft, Mail, Lock } from 'lucide-react';
-import { GlassSurface } from '../common/GlassComponents';
+import {
+  ShieldCheck,
+  ArrowLeft,
+  Mail,
+  Lock,
+  Smartphone,
+  AlertCircle,
+  HelpCircle,
+  FolderOpen,
+  CheckCircle,
+} from 'lucide-react';
+import { GlassSurface, GlassButton, GlassTag } from '../common/GlassComponents';
+import {
+  DEVICE_INSTRUCTIONS,
+  TROUBLESHOOTING_GUIDES,
+  type DeviceBrand,
+} from '../../lib/mobileInstallHelper';
 
 interface StaticPageProps {
-  type: 'about' | 'privacy' | 'terms' | 'contact';
+  type: 'about' | 'privacy' | 'terms' | 'contact' | 'install-guide';
 }
 
 export const StaticPages: React.FC<StaticPageProps> = ({ type }) => {
@@ -175,6 +190,150 @@ export const StaticPages: React.FC<StaticPageProps> = ({ type }) => {
               </div>
             </div>
           </GlassSurface>
+        </article>
+      )}
+
+      {type === 'install-guide' && (
+        <article className="space-y-8">
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <h1 className="text-3xl font-extrabold tracking-tight text-[var(--lg-ink)]">
+                Mobile Installation & Troubleshooting Guide
+              </h1>
+              <GlassTag variant="info">Android APK</GlassTag>
+            </div>
+            <p className="text-sm text-[var(--lg-ink-muted)]">
+              Complete guide to installing applications downloaded from the web on your Android mobile device.
+            </p>
+          </div>
+
+          {/* Quick 3-Step Hero */}
+          <GlassSurface variant="card" className="p-6 sm:p-8 space-y-6 rounded-[28px]">
+            <h2 className="text-lg font-extrabold text-[var(--lg-ink)] flex items-center gap-2">
+              <Smartphone className="h-5 w-5 text-[var(--lg-accent-start)]" />
+              <span>Standard 3-Step Installation</span>
+            </h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="p-4 rounded-[20px] bg-white/25 dark:bg-white/5 border border-white/30 space-y-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-[var(--lg-accent-start)]">
+                  <span className="h-6 w-6 rounded-full bg-[var(--lg-accent-start)] text-[var(--lg-on-accent)] flex items-center justify-center text-xs">
+                    1
+                  </span>
+                  <span>Tap Downloaded APK</span>
+                </div>
+                <p className="text-xs text-[var(--lg-ink-muted)] leading-relaxed">
+                  Open the download notification, or open your phone's <b>Files</b> or <b>My Files</b> app &gt; <b>Downloads</b> folder.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-[20px] bg-white/25 dark:bg-white/5 border border-white/30 space-y-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-[var(--lg-accent-start)]">
+                  <span className="h-6 w-6 rounded-full bg-[var(--lg-accent-start)] text-[var(--lg-on-accent)] flex items-center justify-center text-xs">
+                    2
+                  </span>
+                  <span>Allow Unknown Apps</span>
+                </div>
+                <p className="text-xs text-[var(--lg-ink-muted)] leading-relaxed">
+                  When prompted that your phone is not allowed to install apps from this source, tap <b>Settings</b> and toggle <b>Allow from this source</b> to ON.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-[20px] bg-white/25 dark:bg-white/5 border border-white/30 space-y-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-[var(--lg-accent-start)]">
+                  <span className="h-6 w-6 rounded-full bg-[var(--lg-accent-start)] text-[var(--lg-on-accent)] flex items-center justify-center text-xs">
+                    3
+                  </span>
+                  <span>Tap Install</span>
+                </div>
+                <p className="text-xs text-[var(--lg-ink-muted)] leading-relaxed">
+                  Press Back and tap <b>Install</b>. If Play Protect displays a warning, tap <b>More details</b> &gt; <b>Install anyway</b>.
+                </p>
+              </div>
+            </div>
+          </GlassSurface>
+
+          {/* Common Error Fixes */}
+          <section className="space-y-4">
+            <h2 className="text-xl font-extrabold text-[var(--lg-ink)] flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-[var(--lg-accent-start)]" />
+              <span>Common Installation Problems &amp; Exact Fixes</span>
+            </h2>
+
+            <div className="space-y-4">
+              {TROUBLESHOOTING_GUIDES.map((guide) => (
+                <GlassSurface key={guide.id} variant="card" className="p-5 sm:p-6 space-y-3 rounded-[24px]">
+                  <div className="space-y-1">
+                    <h3 className="font-extrabold text-base text-[var(--lg-ink)]">
+                      {guide.title}
+                    </h3>
+                    <p className="text-xs text-[var(--lg-ink-muted)] italic">
+                      "{guide.symptom}"
+                    </p>
+                  </div>
+
+                  <p className="text-xs text-[var(--lg-ink-muted)] leading-relaxed">
+                    {guide.explanation}
+                  </p>
+
+                  <div className="space-y-1.5 pt-1">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-[var(--lg-ink)]">
+                      How to Fix:
+                    </h4>
+                    <ol className="space-y-1.5">
+                      {guide.solutionSteps.map((step, idx) => (
+                        <li
+                          key={idx}
+                          className="flex items-start gap-2.5 text-xs text-[var(--lg-ink)] bg-white/20 dark:bg-white/5 p-2 rounded-xl"
+                        >
+                          <span className="h-5 w-5 rounded-full bg-[var(--lg-accent-start)] text-[var(--lg-on-accent)] font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                            {idx + 1}
+                          </span>
+                          <span className="leading-relaxed">{step}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+
+                  {guide.proTip && (
+                    <div className="text-xs text-[var(--lg-ink)] bg-[var(--lg-accent-start)]/10 p-2.5 rounded-xl border border-[var(--lg-accent-start)]/20 flex items-center gap-2">
+                      <CheckCircle className="h-4 w-4 text-[var(--lg-accent-start)] shrink-0" />
+                      <span>{guide.proTip}</span>
+                    </div>
+                  )}
+                </GlassSurface>
+              ))}
+            </div>
+          </section>
+
+          {/* Device Brand Specific Routes */}
+          <section className="space-y-4">
+            <h2 className="text-xl font-extrabold text-[var(--lg-ink)] flex items-center gap-2">
+              <Smartphone className="h-5 w-5 text-[var(--lg-accent-start)]" />
+              <span>Settings Paths by Phone Manufacturer</span>
+            </h2>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {(Object.keys(DEVICE_INSTRUCTIONS) as DeviceBrand[]).map((key) => {
+                const item = DEVICE_INSTRUCTIONS[key];
+                return (
+                  <GlassSurface key={key} variant="card" className="p-5 space-y-2 rounded-[22px]">
+                    <h3 className="font-extrabold text-sm text-[var(--lg-ink)]">
+                      {item.brandName}
+                    </h3>
+                    <div className="text-[11px] font-mono text-[var(--lg-ink-muted)] bg-white/20 dark:bg-white/5 p-2 rounded-xl">
+                      {item.settingsPath}
+                    </div>
+                    <ul className="text-xs text-[var(--lg-ink-muted)] space-y-1 list-disc list-inside leading-relaxed pt-1">
+                      {item.steps.slice(0, 3).map((st, i) => (
+                        <li key={i}>{st}</li>
+                      ))}
+                    </ul>
+                  </GlassSurface>
+                );
+              })}
+            </div>
+          </section>
         </article>
       )}
     </div>

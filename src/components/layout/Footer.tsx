@@ -100,6 +100,14 @@ export const Footer: React.FC = () => {
                 </li>
                 <li>
                   <button
+                    onClick={() => navigateTo('install-guide')}
+                    className="hover:text-[var(--lg-accent-start)] transition-colors text-left font-bold glass-pressable"
+                  >
+                    Mobile Install Guide &amp; Fixes
+                  </button>
+                </li>
+                <li>
+                  <button
                     onClick={() => navigateTo('contact')}
                     className="hover:text-[var(--lg-ink)] transition-colors glass-pressable"
                   >

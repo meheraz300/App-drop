@@ -120,21 +120,22 @@
       },
       "required": ["maintenanceMode", "maxUploadSizeBytes", "updatedAt"]
     },
-    "ApkChunk": {
-      "title": "ApkChunk",
-      "description": "Binary storage chunk for intact Android APK distribution",
+    "DeploymentEvent": {
+      "title": "DeploymentEvent",
+      "description": "Log of automated build and deployment events dispatched to GitHub Pages",
       "type": "object",
       "properties": {
-        "versionId": { "type": "string", "maxLength": 128 },
-        "chunkIndex": { "type": "number" },
-        "totalChunks": { "type": "number" },
-        "chunkSizeBytes": { "type": "number" },
-        "totalSizeBytes": { "type": "number" },
-        "sha256": { "type": "string", "maxLength": 64 },
-        "data": { "type": "string" },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "event": { "type": "string", "enum": ["app.published", "app.updated", "app.deleted", "pipeline.manual_trigger"] },
+        "appId": { "type": "string", "maxLength": 128 },
+        "appName": { "type": "string", "maxLength": 150 },
+        "version": { "type": "string", "maxLength": 50 },
+        "triggeredAt": { "type": "string", "format": "date-time" },
+        "actorEmail": { "type": "string", "maxLength": 200 },
+        "status": { "type": "string", "enum": ["triggered", "queued", "completed", "failed"] },
+        "target": { "type": "string", "maxLength": 50 },
+        "details": { "type": "string", "maxLength": 1000 }
       },
-      "required": ["versionId", "chunkIndex", "totalChunks", "chunkSizeBytes", "totalSizeBytes", "data", "createdAt"]
+      "required": ["event", "triggeredAt", "status", "target"]
     }
   },
   "firestore": {
@@ -149,10 +150,6 @@
     "/versions/{versionId}": {
       "schema": { "$ref": "#/entities/AppVersion" },
       "description": "Top-level version records for direct real-time sync across applications"
-    },
-    "/apkChunks/{versionId}/chunks/{chunkId}": {
-      "schema": { "$ref": "#/entities/ApkChunk" },
-      "description": "Binary APK file chunks stored for cross-device retrieval"
     },
     "/uploadSessions/{sessionId}": {
       "schema": { "$ref": "#/entities/UploadSession" },
@@ -169,6 +166,10 @@
     "/auditLogs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
       "description": "Administrative audit trail"
+    },
+    "/deploymentEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/DeploymentEvent" },
+      "description": "Log of automated build and deployment pipeline dispatches"
     },
     "/systemConfig/{configId}": {
       "schema": { "$ref": "#/entities/SystemConfig" },

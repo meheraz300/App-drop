@@ -47,7 +47,7 @@ const AppContent: React.FC = () => {
       );
     }
 
-    if (['about', 'privacy', 'terms', 'contact'].includes(currentRoute)) {
+    if (['about', 'privacy', 'terms', 'contact', 'install-guide'].includes(currentRoute)) {
       return (
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <StaticPages type={currentRoute as any} />

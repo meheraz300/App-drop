@@ -7,9 +7,17 @@ import {
   AlertTriangle,
   Loader2,
   CheckCircle2,
+  Smartphone,
+  HelpCircle,
+  FolderOpen,
+  ChevronRight,
+  ShieldCheck,
+  RefreshCw,
 } from 'lucide-react';
 import { GlassSurface, GlassButton, GlassTag } from '../common/GlassComponents';
 import { formatApkDownloadFileName } from '../../lib/downloadHelper';
+import { MobileInstallAssistantModal } from './MobileInstallAssistantModal';
+import { type InstallIssueType } from '../../lib/mobileInstallHelper';
 
 export const AppDetailsView: React.FC = () => {
   const { apps, versions, selectedAppId, navigateTo, requestDownload, isInitialSyncLoading } = useApp();
@@ -19,6 +27,13 @@ export const AppDetailsView: React.FC = () => {
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [iconError, setIconError] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'versions'>('overview');
+  const [showInstallModal, setShowInstallModal] = useState(false);
+  const [showPostDownloadCard, setShowPostDownloadCard] = useState(false);
+  const [initialModalIssue, setInitialModalIssue] = useState<InstallIssueType | undefined>(undefined);
+  const [lastDownloadInfo, setLastDownloadInfo] = useState<{
+    fileName: string;
+    directServerUrl?: string;
+  } | null>(null);
 
   const app = apps.find((a) => a.id === selectedAppId);
 
@@ -77,7 +92,7 @@ export const AppDetailsView: React.FC = () => {
         });
       }, 160);
 
-      const { downloadUrl, fileName } = await requestDownload(app.id, versionId);
+      const { downloadUrl, fileName, directServerUrl } = await requestDownload(app.id, versionId);
 
       // Finish progress animation
       clearInterval(progressTimer);
@@ -88,12 +103,17 @@ export const AppDetailsView: React.FC = () => {
         const targetVer = appVersions.find((v) => v.id === versionId);
         const resolvedFileName =
           fileName || formatApkDownloadFileName(app.name, targetVer?.versionName);
+        setLastDownloadInfo({ fileName: resolvedFileName, directServerUrl });
+
         const anchor = document.createElement('a');
         anchor.href = downloadUrl;
         anchor.download = resolvedFileName;
         document.body.appendChild(anchor);
         anchor.click();
         document.body.removeChild(anchor);
+
+        // Show helpful mobile installation guidance
+        setShowPostDownloadCard(true);
 
         // Reset state after completion display
         setTimeout(() => {
@@ -164,6 +184,75 @@ export const AppDetailsView: React.FC = () => {
               </span>{' '}
               must upgrade to the latest release to retain service connectivity.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Post-Download Mobile Installation Guidance Strip */}
+      {showPostDownloadCard && (
+        <div className="p-4 sm:p-5 rounded-[24px] border border-[var(--lg-accent-start)]/40 bg-[var(--lg-accent-start)]/10 text-[var(--lg-ink)] space-y-3 animate-in fade-in slide-in-from-top-2 duration-300 shadow-sm">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2.5 font-bold text-sm">
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-[var(--lg-accent-start)] text-[var(--lg-on-accent)] shrink-0">
+                <CheckCircle2 className="h-4 w-4" />
+              </div>
+              <span>APK Download Started! Follow these 3 steps to install on Android:</span>
+            </div>
+            <button
+              onClick={() => setShowPostDownloadCard(false)}
+              className="text-xs text-[var(--lg-ink-muted)] hover:text-[var(--lg-ink)] font-bold px-2 py-0.5"
+            >
+              Dismiss
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+            <div className="p-3 rounded-xl bg-white/40 dark:bg-white/10 border border-white/30 space-y-1">
+              <span className="font-extrabold text-[var(--lg-accent-start)]">1. Open File</span>
+              <p className="text-[var(--lg-ink-muted)] leading-relaxed">
+                Tap the download complete notification, or open phone's <b>Files</b> &gt; <b>Downloads</b>.
+              </p>
+            </div>
+            <div className="p-3 rounded-xl bg-white/40 dark:bg-white/10 border border-white/30 space-y-1">
+              <span className="font-extrabold text-[var(--lg-accent-start)]">2. Allow Unknown Apps</span>
+              <p className="text-[var(--lg-ink-muted)] leading-relaxed">
+                If blocked by security, tap <b>Settings</b> &gt; turn ON <b>Allow from this source</b>.
+              </p>
+            </div>
+            <div className="p-3 rounded-xl bg-white/40 dark:bg-white/10 border border-white/30 space-y-1">
+              <span className="font-extrabold text-[var(--lg-accent-start)]">3. Tap Install</span>
+              <p className="text-[var(--lg-ink-muted)] leading-relaxed">
+                Press Back and tap <b>Install</b>. If Play Protect warns, tap <b>More details</b> &gt; <b>Install anyway</b>.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-[var(--lg-accent-start)]/20">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] text-[var(--lg-ink-muted)]">
+                Downloaded: <b>{lastDownloadInfo?.fileName}</b>
+              </span>
+              {lastDownloadInfo?.directServerUrl && (
+                <a
+                  href={lastDownloadInfo.directServerUrl}
+                  download={lastDownloadInfo.fileName}
+                  className="text-[11px] font-semibold text-[var(--lg-accent-start)] hover:underline inline-flex items-center gap-1 bg-white/50 dark:bg-white/10 px-2 py-0.5 rounded-lg border border-white/20"
+                >
+                  <Download className="h-3 w-3" />
+                  <span>Direct HTTP Link</span>
+                </a>
+              )}
+            </div>
+            <button
+              onClick={() => {
+                setInitialModalIssue(undefined);
+                setShowInstallModal(true);
+              }}
+              className="text-xs font-bold text-[var(--lg-accent-start)] hover:underline inline-flex items-center gap-1"
+            >
+              <span>Installation Troubleshooter</span>
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
           </div>
         </div>
       )}
@@ -266,6 +355,18 @@ export const AppDetailsView: React.FC = () => {
               <span className="font-mono opacity-80">(code {latestVersion.versionCode})</span>
             </div>
           )}
+
+          {/* Direct Mobile Installation Help Trigger */}
+          <button
+            onClick={() => {
+              setInitialModalIssue(undefined);
+              setShowInstallModal(true);
+            }}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--lg-accent-start)] hover:underline glass-pressable py-1"
+          >
+            <Smartphone className="h-3.5 w-3.5" />
+            <span>Can't install on your mobile? Tap for fix</span>
+          </button>
         </div>
       </GlassSurface>
 
@@ -349,6 +450,118 @@ export const AppDetailsView: React.FC = () => {
               {app.description || app.shortDescription}
             </p>
           </GlassSurface>
+
+          {/* Mobile Installation & Compatibility Card */}
+          <GlassSurface variant="card" className="p-6 space-y-4 rounded-[24px]">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <Smartphone className="h-5 w-5 text-[var(--lg-accent-start)]" />
+                <h3 className="text-base font-bold text-[var(--lg-ink)]">
+                  Mobile Installation &amp; Compatibility
+                </h3>
+              </div>
+              <GlassTag variant="info">Android APK</GlassTag>
+            </div>
+
+            <p className="text-xs sm:text-sm text-[var(--lg-ink-muted)] leading-relaxed">
+              Downloaded this app on your phone and can't install it? Android requires a one-time permission to install apps downloaded from web browsers. Select your issue for the instant fix:
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setInitialModalIssue('unknown_sources');
+                  setShowInstallModal(true);
+                }}
+                className="p-3.5 rounded-2xl bg-white/20 dark:bg-white/5 border border-white/20 hover:border-[var(--lg-accent-start)]/50 cursor-pointer transition-all space-y-1 group text-left"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-xs text-[var(--lg-ink)] group-hover:text-[var(--lg-accent-start)] transition-colors">
+                    1. "Phone not allowed to install"
+                  </span>
+                  <ChevronRight className="h-3.5 w-3.5 text-[var(--lg-ink-muted)] group-hover:translate-x-0.5 transition-transform" />
+                </div>
+                <p className="text-[11px] text-[var(--lg-ink-muted)] leading-relaxed">
+                  Tap Settings &gt; enable "Allow from this source" for Chrome / Files.
+                </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setInitialModalIssue('play_protect');
+                  setShowInstallModal(true);
+                }}
+                className="p-3.5 rounded-2xl bg-white/20 dark:bg-white/5 border border-white/20 hover:border-[var(--lg-accent-start)]/50 cursor-pointer transition-all space-y-1 group text-left"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-xs text-[var(--lg-ink)] group-hover:text-[var(--lg-accent-start)] transition-colors">
+                    2. "Blocked by Play Protect"
+                  </span>
+                  <ChevronRight className="h-3.5 w-3.5 text-[var(--lg-ink-muted)] group-hover:translate-x-0.5 transition-transform" />
+                </div>
+                <p className="text-[11px] text-[var(--lg-ink-muted)] leading-relaxed">
+                  Tap "More details" dropdown &gt; select "Install anyway".
+                </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setInitialModalIssue('cant_open_file');
+                  setShowInstallModal(true);
+                }}
+                className="p-3.5 rounded-2xl bg-white/20 dark:bg-white/5 border border-white/20 hover:border-[var(--lg-accent-start)]/50 cursor-pointer transition-all space-y-1 group text-left"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-xs text-[var(--lg-ink)] group-hover:text-[var(--lg-accent-start)] transition-colors">
+                    3. "Can't open file"
+                  </span>
+                  <ChevronRight className="h-3.5 w-3.5 text-[var(--lg-ink-muted)] group-hover:translate-x-0.5 transition-transform" />
+                </div>
+                <p className="text-[11px] text-[var(--lg-ink-muted)] leading-relaxed">
+                  Open phone's built-in "Files" or "My Files" app &gt; Downloads &gt; tap APK.
+                </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setInitialModalIssue('parse_error');
+                  setShowInstallModal(true);
+                }}
+                className="p-3.5 rounded-2xl bg-white/20 dark:bg-white/5 border border-white/20 hover:border-[var(--lg-accent-start)]/50 cursor-pointer transition-all space-y-1 group text-left"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-xs text-[var(--lg-ink)] group-hover:text-[var(--lg-accent-start)] transition-colors">
+                    4. "Problem parsing package"
+                  </span>
+                  <ChevronRight className="h-3.5 w-3.5 text-[var(--lg-ink-muted)] group-hover:translate-x-0.5 transition-transform" />
+                </div>
+                <p className="text-[11px] text-[var(--lg-ink-muted)] leading-relaxed">
+                  Re-download complete file or ensure filename ends with .apk.
+                </p>
+              </button>
+            </div>
+
+            <div className="pt-2 flex flex-wrap items-center justify-between gap-3">
+              <span className="text-[11px] text-[var(--lg-ink-muted)] font-mono">
+                Package: {app.packageName}
+              </span>
+              <GlassButton
+                variant="secondary"
+                onClick={() => {
+                  setInitialModalIssue(undefined);
+                  setShowInstallModal(true);
+                }}
+                className="h-9 px-4 text-xs font-bold"
+              >
+                <Smartphone className="h-3.5 w-3.5" />
+                <span>Open Full Mobile Troubleshooter</span>
+              </GlassButton>
+            </div>
+          </GlassSurface>
         </div>
       )}
 
@@ -424,6 +637,17 @@ export const AppDetailsView: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* Mobile Installation Assistant & Troubleshooting Modal */}
+      <MobileInstallAssistantModal
+        isOpen={showInstallModal}
+        onClose={() => setShowInstallModal(false)}
+        appName={app.name}
+        versionName={latestVersion?.versionName}
+        apkSizeMb={formattedSize}
+        onRedownload={() => latestVersion && handleDownload(latestVersion.id)}
+        initialIssue={initialModalIssue}
+      />
     </div>
   );
 };

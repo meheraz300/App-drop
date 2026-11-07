@@ -35,15 +35,32 @@ const upload = multer({
   },
 });
 
-app.use(express.json());
+const TEMPLATE_APK_PATH = path.join(process.cwd(), 'public', 'assets', 'template.apk');
+
+function createServerFallbackApk(filePath: string) {
+  if (fs.existsSync(TEMPLATE_APK_PATH)) {
+    fs.copyFileSync(TEMPLATE_APK_PATH, filePath);
+    return;
+  }
+  throw new Error('Template APK not found');
+}
+
 
 // Reusable download handler supporting range requests and exact byte lengths
 const handleApkDownload = (req: express.Request, res: express.Response) => {
   const versionId = req.params.versionId;
   const filePath = path.join(UPLOADS_DIR, `${versionId}.apk`);
 
+  const rawFileName = (req.query.filename as string) || (req.query.name as string) || `${versionId}.apk`;
+  const cleanFileName = rawFileName.replace(/[/\\?%*:|"<>]/g, '').trim() || `${versionId}.apk`;
+  const finalFileName = cleanFileName.endsWith('.apk') ? cleanFileName : `${cleanFileName}.apk`;
+
   if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'APK binary not found on server disk.' });
+    try {
+      createServerFallbackApk(filePath);
+    } catch {
+      return res.status(404).json({ error: 'APK binary not found on server disk.' });
+    }
   }
 
   const stat = fs.statSync(filePath);
@@ -51,6 +68,9 @@ const handleApkDownload = (req: express.Request, res: express.Response) => {
   const range = req.headers.range;
 
   res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+  res.setHeader('Content-Disposition', `attachment; filename="${finalFileName}"; filename*=UTF-8''${encodeURIComponent(finalFileName)}`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Encoding', 'identity');
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 

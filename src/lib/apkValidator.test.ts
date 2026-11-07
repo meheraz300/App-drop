@@ -61,3 +61,19 @@ test('validateApkAgainstApp rejects mismatches and accepts compliant metadata', 
   assert.equal(mismatchResult.valid, false);
   assert.match(mismatchResult.errors[0], /Package name mismatch/);
 });
+
+test('inspectApkBinary decodes real AndroidManifest.xml from signed template.apk', async () => {
+  const fs = await import('fs');
+  const path = await import('path');
+  const templatePath = path.join(process.cwd(), 'public', 'assets', 'template.apk');
+  if (fs.existsSync(templatePath)) {
+    const fileBuf = fs.readFileSync(templatePath);
+    const meta = await inspectApkBinary(fileBuf.buffer, 'Calculator.apk');
+    assert.equal(meta.packageName, 'com.simplemobiletools.calculator');
+    assert.equal(meta.versionName, '5.12.0');
+    assert.equal(meta.versionCode, 61);
+    assert.equal(meta.fileSizeBytes, 9684763);
+    assert.ok(meta.signingCertificateSha256.startsWith('SHA256:'));
+  }
+});
+

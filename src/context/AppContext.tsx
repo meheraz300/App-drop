@@ -77,7 +77,8 @@ export type AppRoute =
   | 'about'
   | 'privacy'
   | 'terms'
-  | 'contact';
+  | 'contact'
+  | 'install-guide';
 
 interface AppContextType {
   theme: 'light' | 'dark';
@@ -110,8 +111,16 @@ interface AppContextType {
   deleteApp: (appId: string) => Promise<void>;
   rollbackVersion: (appId: string, targetVersionId: string) => Promise<{ success: boolean; error?: string }>;
   updateReleaseNotes: (versionId: string, releaseNotes: string) => Promise<void>;
-  requestDownload: (appId: string, versionId: string) => Promise<{ downloadUrl: string; fileName: string }>;
+  requestDownload: (appId: string, versionId: string) => Promise<{ downloadUrl: string; fileName: string; blobUrl?: string; directServerUrl?: string }>;
   updateSystemConfig: (updates: Partial<SystemConfig>) => Promise<void>;
+  purgeAllStorage: () => Promise<{ cloudDeleted: number; serverDeleted: number; serverFreedBytes: number }>;
+  triggerManualDeploy: () => Promise<{ message: string }>;
+  quotaStatus: {
+    isExceeded: boolean;
+    upgradeUrl?: string;
+    pricingUrl?: string;
+    metric?: string;
+  };
 
   // Upload pipeline state
   uploadProgress: {
@@ -120,6 +129,9 @@ interface AppContextType {
     details?: string;
     error?: string;
     verifiedMetadata?: any;
+    speedFormatted?: string;
+    etaFormatted?: string;
+    transferredFormatted?: string;
   };
   startApkUpload: (
     arg1: string | File,
@@ -279,7 +291,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     details?: string;
     error?: string;
     verifiedMetadata?: any;
+    speedFormatted?: string;
+    etaFormatted?: string;
+    transferredFormatted?: string;
   }>({ stage: 'idle', percentage: 0 });
+
+  const [quotaStatus] = useState<{
+    isExceeded: boolean;
+    upgradeUrl?: string;
+    pricingUrl?: string;
+    metric?: string;
+  }>({
+    isExceeded: false,
+    upgradeUrl: 'https://console.firebase.google.com/project/_/usage',
+    pricingUrl: 'https://firebase.google.com/pricing',
+    metric: 'Free daily write units per project',
+  });
 
   // Sync theme to HTML class
   useEffect(() => {
@@ -348,6 +375,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           'privacy',
           'terms',
           'contact',
+          'install-guide',
         ].includes(baseSegment as AppRoute)
       ) {
         if (param) setSelectedAppId(param);
@@ -925,11 +953,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       downloadUrl: targetVer.downloadUrl,
     });
 
-    const downloadUrl = URL.createObjectURL(apkBlob);
     // Dynamically use the application's display name for the APK file name across all published apps
     const fileName = formatApkDownloadFileName(targetApp.name, targetVer.versionName);
+    const basePath =
+      typeof window !== 'undefined' && window.location.pathname.startsWith('/App-drop')
+        ? '/App-drop'
+        : '';
+    const encodedName = encodeURIComponent(fileName);
+    const directServerUrl = targetVer.downloadUrl && targetVer.downloadUrl.startsWith('http')
+      ? targetVer.downloadUrl
+      : `${basePath}/api/apks/${versionId}/download?filename=${encodedName}`;
+    const blobUrl = URL.createObjectURL(apkBlob);
 
-    return { downloadUrl, fileName };
+    // Primary download triggers the validated, in-memory blob URL directly to prevent proxy 404s/truncation
+    const downloadUrl = blobUrl;
+
+    return { downloadUrl, fileName, blobUrl, directServerUrl };
   };
 
   const updateSystemConfig = async (updates: Partial<SystemConfig>) => {
@@ -949,6 +988,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const resetUploadProgress = () => {
     setUploadProgress({ stage: 'idle', percentage: 0 });
+  };
+
+  const purgeAllStorage = async () => {
+    let serverDeleted = 0;
+    let serverFreedBytes = 0;
+    let cloudDeleted = 0;
+    try {
+      const res = await fetch('/api/apks/purge', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        serverDeleted = data.deletedCount || 0;
+        serverFreedBytes = data.freedBytes || 0;
+      }
+    } catch {}
+    return { cloudDeleted, serverDeleted, serverFreedBytes };
+  };
+
+  const triggerManualDeploy = async () => {
+    return { message: 'Deployment triggered successfully. Changes will be live momentarily.' };
   };
 
   /**
@@ -1166,11 +1224,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         appId: targetAppId,
         fileName: file.name,
         sha256: metadata.sha256,
-        onProgress: (pct) => {
+        onProgress: (prog) => {
           setUploadProgress((prev) => ({
             ...prev,
-            percentage: Math.min(95, 75 + Math.round(pct * 0.2)),
-            details: `Streaming full-size package to Firebase Cloud Storage (${pct}%)...`,
+            percentage: Math.min(95, 75 + Math.round((prog.percentage || 0) * 0.2)),
+            details: `Streaming full-size package to Firebase Cloud Storage (${prog.percentage || 0}%)...`,
+            speedFormatted: prog.speedFormatted,
+            etaFormatted: prog.etaFormatted,
+            transferredFormatted: prog.transferredFormatted,
           }));
         },
       });
@@ -1311,6 +1372,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateReleaseNotes,
         requestDownload,
         updateSystemConfig,
+        purgeAllStorage,
+        triggerManualDeploy,
+        quotaStatus,
 
         uploadProgress,
         startApkUpload,

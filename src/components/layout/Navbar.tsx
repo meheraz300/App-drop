@@ -90,6 +90,16 @@ export const Navbar: React.FC = () => {
             >
               About Hub
             </button>
+            <button
+              onClick={() => navigateTo('install-guide')}
+              className={`px-4 py-2 rounded-full transition-all glass-pressable ${
+                currentRoute === 'install-guide'
+                  ? 'bg-white/30 dark:bg-white/10 text-[var(--lg-ink)] font-bold shadow-xs border border-white/40'
+                  : 'hover:text-[var(--lg-ink)] hover:bg-white/10'
+              }`}
+            >
+              Install Guide
+            </button>
             {isAdmin && (
               <button
                 onClick={() => navigateTo('admin-dashboard')}

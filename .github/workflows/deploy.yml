@@ -5,6 +5,13 @@ on:
     branches:
       - main
   workflow_dispatch:
+  repository_dispatch:
+    types:
+      - app_published
+      - app_updated
+      - app_deleted
+      - pipeline_rebuild
+      - appdrop_sync
 
 permissions:
   contents: read
