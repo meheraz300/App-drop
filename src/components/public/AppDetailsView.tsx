@@ -13,14 +13,15 @@ import {
   ChevronRight,
   ShieldCheck,
   RefreshCw,
+  Clock,
 } from 'lucide-react';
 import { GlassSurface, GlassButton, GlassTag } from '../common/GlassComponents';
-import { formatApkDownloadFileName } from '../../lib/downloadHelper';
+import { formatApkDownloadFileName, estimateDownloadDuration } from '../../lib/downloadHelper';
 import { MobileInstallAssistantModal } from './MobileInstallAssistantModal';
 import { type InstallIssueType } from '../../lib/mobileInstallHelper';
 
 export const AppDetailsView: React.FC = () => {
-  const { apps, versions, selectedAppId, navigateTo, requestDownload, isInitialSyncLoading } = useApp();
+  const { apps, versions, downloadStats, selectedAppId, navigateTo, requestDownload, isInitialSyncLoading } = useApp();
 
   const [downloadingVersionId, setDownloadingVersionId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
@@ -105,8 +106,10 @@ export const AppDetailsView: React.FC = () => {
           fileName || formatApkDownloadFileName(app.name, targetVer?.versionName);
         setLastDownloadInfo({ fileName: resolvedFileName, directServerUrl });
 
+        // Trigger direct server stream so Android DownloadManager receives exact binary headers
+        const downloadLink = directServerUrl || downloadUrl;
         const anchor = document.createElement('a');
-        anchor.href = downloadUrl;
+        anchor.href = downloadLink;
         anchor.download = resolvedFileName;
         document.body.appendChild(anchor);
         anchor.click();
@@ -143,6 +146,14 @@ export const AppDetailsView: React.FC = () => {
   const formattedSize = latestVersion?.apkSizeBytes
     ? `${(latestVersion.apkSizeBytes / (1024 * 1024)).toFixed(1)} MB`
     : 'APK';
+
+  const appDownloads = downloadStats
+    ? downloadStats
+        .filter((s) => s.appId === app.id)
+        .reduce((sum, s) => sum + (s.requestCount || (s as any).downloads || 0), 0)
+    : 0;
+
+  const estDuration = estimateDownloadDuration(latestVersion?.apkSizeBytes || 0);
 
   return (
     <div className="max-w-5xl mx-auto py-8 sm:py-10 space-y-8">
@@ -284,10 +295,21 @@ export const AppDetailsView: React.FC = () => {
               <span className="font-mono text-[var(--lg-ink-muted)]">{app.packageName}</span>
             </div>
 
-            {/* Note: Download count text has been removed as requested */}
-            <div className="flex flex-wrap items-center gap-2 pt-1 text-xs text-[var(--lg-ink-muted)] font-medium">
-              <Calendar className="h-3.5 w-3.5 text-[var(--lg-ink-muted)]" />
-              <span>Updated {formattedDate}</span>
+            <div className="flex flex-wrap items-center gap-3 pt-1 text-xs text-[var(--lg-ink-muted)] font-medium">
+              <div className="flex items-center gap-1.5" title="Total downloads">
+                <Download className="h-3.5 w-3.5 text-[var(--lg-accent-start)]" />
+                <span className="font-semibold text-[var(--lg-ink)]">{appDownloads} downloads</span>
+              </div>
+              <span>·</span>
+              <div className="flex items-center gap-1.5" title="Estimated download duration">
+                <Clock className="h-3.5 w-3.5 text-[var(--lg-accent-start)]" />
+                <span>Est. time: {estDuration.summary}</span>
+              </div>
+              <span>·</span>
+              <div className="flex items-center gap-1.5">
+                <Calendar className="h-3.5 w-3.5 text-[var(--lg-ink-muted)]" />
+                <span>Updated {formattedDate}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -347,12 +369,17 @@ export const AppDetailsView: React.FC = () => {
           )}
 
           {latestVersion && (
-            <div className="text-[11px] text-[var(--lg-ink-muted)] text-center md:text-right font-medium">
-              <span>Latest: </span>
-              <span className="font-mono font-bold text-[var(--lg-ink)]">
-                v{latestVersion.versionName}
-              </span>{' '}
-              <span className="font-mono opacity-80">(code {latestVersion.versionCode})</span>
+            <div className="text-[11px] text-[var(--lg-ink-muted)] text-center md:text-right font-medium space-y-0.5">
+              <div>
+                <span>Latest: </span>
+                <span className="font-mono font-bold text-[var(--lg-ink)]">
+                  v{latestVersion.versionName}
+                </span>{' '}
+                <span className="font-mono opacity-80">(code {latestVersion.versionCode})</span>
+              </div>
+              <div className="text-[10px] text-[var(--lg-ink-muted)] opacity-90">
+                <span>Est. {estDuration.wifi5g} on 5G/Wi-Fi · {estDuration.lte4g} on 4G</span>
+              </div>
             </div>
           )}
 

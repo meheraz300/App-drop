@@ -56,10 +56,15 @@ const handleApkDownload = (req: express.Request, res: express.Response) => {
   const finalFileName = cleanFileName.endsWith('.apk') ? cleanFileName : `${cleanFileName}.apk`;
 
   if (!fs.existsSync(filePath)) {
-    try {
-      createServerFallbackApk(filePath);
-    } catch {
-      return res.status(404).json({ error: 'APK binary not found on server disk.' });
+    // Only fall back to template.apk if the requested version is specifically the official calculator sample
+    if (fs.existsSync(TEMPLATE_APK_PATH) && (versionId.includes('calc') || versionId.includes('official'))) {
+      try {
+        createServerFallbackApk(filePath);
+      } catch {
+        return res.status(404).json({ error: 'APK binary not found on server disk.' });
+      }
+    } else {
+      return res.status(404).json({ error: 'APK binary not found on server disk. Please ensure the admin uploaded the release package.' });
     }
   }
 
@@ -108,11 +113,33 @@ const handleApkUpload = (req: express.Request, res: express.Response) => {
   }
 
   const stat = fs.statSync(targetPath);
+  const appId = (req.body.appId || req.query.appId || '') as string;
+  const fileName = (req.body.fileName || req.query.fileName || file.originalname || `${versionId}.apk`) as string;
+
+  try {
+    const metaPath = path.join(UPLOADS_DIR, `${versionId}.meta.json`);
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify(
+        {
+          versionId,
+          appId,
+          originalFileName: fileName,
+          sizeBytes: stat.size,
+          uploadedAt: new Date().toISOString(),
+        },
+        null,
+        2
+      )
+    );
+  } catch {}
+
+  const basePath = req.originalUrl.startsWith('/App-drop') ? '/App-drop' : '';
   return res.json({
     success: true,
     versionId,
     sizeBytes: stat.size,
-    downloadUrl: `/api/apks/${versionId}/download`,
+    downloadUrl: `${basePath}/api/apks/${versionId}/download`,
     message: `Stored intact APK binary (${stat.size} bytes).`,
   });
 };

@@ -1,7 +1,7 @@
 import React from 'react';
 import type { AppRecord, VersionRecord } from '../../types';
 import { useApp } from '../../context/AppContext';
-import { ArrowUpRight, HardDrive, ShieldCheck } from 'lucide-react';
+import { ArrowUpRight, HardDrive, ShieldCheck, Download } from 'lucide-react';
 import { GlassSurface, GlassTag } from '../common/GlassComponents';
 
 interface AppCardProps {
@@ -10,7 +10,7 @@ interface AppCardProps {
   downloadCount?: number;
 }
 
-export const AppCard: React.FC<AppCardProps> = ({ app, latestVersion }) => {
+export const AppCard: React.FC<AppCardProps> = ({ app, latestVersion, downloadCount }) => {
   const { navigateTo } = useApp();
   const [imgError, setImgError] = React.useState(false);
 
@@ -78,12 +78,19 @@ export const AppCard: React.FC<AppCardProps> = ({ app, latestVersion }) => {
         </p>
       </div>
 
-      {/* Card Footer: Size & Verified Tag */}
+      {/* Card Footer: Size, Downloads & Verified Tag */}
       <div className="mt-4 pt-3 border-t border-white/20 dark:border-white/10 flex items-center justify-between gap-2 text-xs">
-        <div className="flex items-center gap-1.5 font-bold text-[var(--lg-ink)]">
-          <HardDrive className="h-3.5 w-3.5 text-[var(--lg-ink-muted)]" />
-          <span>{formattedSize}</span>
-          <span className="text-[var(--lg-ink-muted)] font-normal ml-1">· {updatedDate}</span>
+        <div className="flex items-center gap-2 font-medium text-[var(--lg-ink)] flex-wrap">
+          <div className="flex items-center gap-1 font-bold">
+            <HardDrive className="h-3.5 w-3.5 text-[var(--lg-ink-muted)]" />
+            <span>{formattedSize}</span>
+          </div>
+          <span className="text-[var(--lg-ink-muted)]">·</span>
+          <div className="flex items-center gap-1 text-[var(--lg-ink-muted)]" title="Total downloads">
+            <Download className="h-3.5 w-3.5 text-[var(--lg-accent-start)]" />
+            <span>{downloadCount ?? 0}</span>
+          </div>
+          <span className="text-[var(--lg-ink-muted)] font-normal">· {updatedDate}</span>
         </div>
 
         <GlassTag variant={app.featured ? 'info' : 'success'}>

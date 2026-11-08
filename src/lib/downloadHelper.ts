@@ -34,3 +34,31 @@ export function formatApkDownloadFileName(appName?: string | null, versionName?:
 
   return `${baseName}.apk`;
 }
+
+/**
+ * Estimates the download duration for an APK file across Wi-Fi/5G and 4G LTE connections.
+ * Provides clear human-readable time estimates so users know exactly how long the download will take.
+ */
+export function estimateDownloadDuration(sizeBytes: number): {
+  wifi5g: string;
+  lte4g: string;
+  summary: string;
+} {
+  if (!sizeBytes || sizeBytes <= 0) {
+    return { wifi5g: '< 1s', lte4g: '< 1s', summary: '< 1s on Wi-Fi / 5G' };
+  }
+
+  // 5G / High-Speed Wi-Fi (~60 Mbps = 7.5 MB/s)
+  const wifiSec = Math.max(1, Math.round(sizeBytes / (7.5 * 1024 * 1024)));
+  // 4G LTE (~18 Mbps = 2.25 MB/s)
+  const lteSec = Math.max(1, Math.round(sizeBytes / (2.25 * 1024 * 1024)));
+
+  const wifiFormatted = wifiSec <= 1 ? '~1s' : `~${wifiSec}s`;
+  const lteFormatted = lteSec <= 1 ? '~1s' : `~${lteSec}s`;
+
+  return {
+    wifi5g: wifiFormatted,
+    lte4g: lteFormatted,
+    summary: `${wifiFormatted} on 5G/Wi-Fi · ${lteFormatted} on 4G`,
+  };
+}

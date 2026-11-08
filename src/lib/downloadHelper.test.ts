@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatApkDownloadFileName } from './downloadHelper';
+import { formatApkDownloadFileName, estimateDownloadDuration } from './downloadHelper';
 
 test('formatApkDownloadFileName uses display name instead of package name', () => {
   const result = formatApkDownloadFileName('Signal', '5.40.1');
@@ -35,4 +35,24 @@ test('formatApkDownloadFileName handles missing version name', () => {
   assert.equal(formatApkDownloadFileName('Telegram'), 'Telegram.apk');
   assert.equal(formatApkDownloadFileName('Telegram', ''), 'Telegram.apk');
   assert.equal(formatApkDownloadFileName('Telegram', null), 'Telegram.apk');
+});
+
+test('estimateDownloadDuration returns quick response for zero or invalid sizes', () => {
+  const result = estimateDownloadDuration(0);
+  assert.equal(result.wifi5g, '< 1s');
+  assert.equal(result.lte4g, '< 1s');
+  assert.ok(result.summary.includes('< 1s'));
+});
+
+test('estimateDownloadDuration computes accurate times for typical APK sizes', () => {
+  // ~15 MB APK
+  const result15Mb = estimateDownloadDuration(15 * 1024 * 1024);
+  assert.equal(result15Mb.wifi5g, '~2s');
+  assert.equal(result15Mb.lte4g, '~7s');
+  assert.ok(result15Mb.summary.includes('~2s on 5G/Wi-Fi'));
+
+  // ~7.31 MB APK
+  const result7Mb = estimateDownloadDuration(7.31 * 1024 * 1024);
+  assert.equal(result7Mb.wifi5g, '~1s');
+  assert.equal(result7Mb.lte4g, '~3s');
 });

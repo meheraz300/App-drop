@@ -829,10 +829,8 @@ export async function uploadApkToCloudStorage(
       });
     });
 
-    // Fast 1.5-second fallback in headless test / Node environments, 5 minutes in real browser environments
-    // Ensures large APKs upload completely without premature cancellation
-    const isNode = typeof window === 'undefined';
-    const timeoutMs = isNode ? 1500 : 300000;
+    // 2.5-second timeout for cloud storage so it never stalls or freezes the primary upload pipeline
+    const timeoutMs = 2500;
 
     const timeoutPromise = new Promise<{ downloadUrl: string; storagePath: string } | null>((resolve) => {
       setTimeout(() => {

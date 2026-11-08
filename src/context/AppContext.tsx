@@ -563,6 +563,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     );
 
+    // Real-time listener for downloadStats across all devices
+    const statsQuery = collection(db, 'downloadStats');
+    const unsubscribeStats = onSnapshot(
+      statsQuery,
+      (snapshot) => {
+        const remoteStats: DownloadStat[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data() as DownloadStat;
+          if (data && data.appId) {
+            remoteStats.push(data);
+          }
+        });
+        if (remoteStats.length > 0) {
+          setDownloadStats((prevLocal) => {
+            const merged = new Map<string, DownloadStat>();
+            prevLocal.forEach((s) => merged.set(s.id, s));
+            remoteStats.forEach((s) => merged.set(s.id, s));
+            return Array.from(merged.values());
+          });
+        }
+      },
+      (error) => {
+        console.warn('Real-time download stats snapshot sync notice:', error.message);
+      }
+    );
+
     // Instant local cross-tab real-time channel
     let crossTabChannel: BroadcastChannel | null = null;
     try {
@@ -600,6 +626,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       unsubscribeApps();
       unsubscribeVersions();
+      unsubscribeStats();
       if (crossTabChannel) {
         crossTabChannel.close();
       }
@@ -930,7 +957,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDownloadStats(updatedStats);
     setDownloadEvents(updatedEvents);
 
-    // Sync download event to Firestore
+    // Sync download event & download count to Firestore
     try {
       const eventDoc = {
         id: reqId,
@@ -941,17 +968,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         requestId: reqId,
       };
       await setDoc(doc(db, 'downloadEvents', reqId), eventDoc);
-    } catch {
-      // Non-blocking download event record
-    }
 
-    // Retrieve exact binary blob preserving full byte length across IndexedDB, Cache API, Server, and Firestore
-    const apkBlob = await getApkBinary(versionId, {
-      expectedSizeBytes: targetVer.apkSizeBytes,
-      appName: targetApp.name,
-      versionName: targetVer.versionName,
-      downloadUrl: targetVer.downloadUrl,
-    });
+      const today = new Date().toISOString().split('T')[0];
+      const statId = `${today}_${appId}_${versionId}`.replace(/[/\\?%*:|"<>]/g, '_');
+      const curStat = updatedStats.find((s) => s.appId === appId && s.versionId === versionId && s.date === today);
+      const totalCount = curStat ? (curStat.requestCount || (curStat as any).downloads || 1) : 1;
+      await setDoc(
+        doc(db, 'downloadStats', statId),
+        {
+          id: statId,
+          appId,
+          versionId,
+          date: today,
+          requestCount: totalCount,
+          downloads: totalCount,
+          updatedAt: new Date().toISOString(),
+          lastDownloadedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch (statErr) {
+      console.warn('Non-blocking Firestore download event sync notice:', statErr);
+    }
 
     // Dynamically use the application's display name for the APK file name across all published apps
     const fileName = formatApkDownloadFileName(targetApp.name, targetVer.versionName);
@@ -960,15 +998,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? '/App-drop'
         : '';
     const encodedName = encodeURIComponent(fileName);
-    const directServerUrl = targetVer.downloadUrl && targetVer.downloadUrl.startsWith('http')
-      ? targetVer.downloadUrl
-      : `${basePath}/api/apks/${versionId}/download?filename=${encodedName}`;
-    const blobUrl = URL.createObjectURL(apkBlob);
+    const directServerUrl =
+      targetVer.downloadUrl && targetVer.downloadUrl.startsWith('http')
+        ? targetVer.downloadUrl
+        : `${basePath}/api/apks/${versionId}/download?filename=${encodedName}`;
 
-    // Primary download triggers the validated, in-memory blob URL directly to prevent proxy 404s/truncation
-    const downloadUrl = blobUrl;
+    // Primary download uses directServerUrl to ensure Android system DownloadManager
+    // receives Content-Type: application/vnd.android.package-archive directly from the server stream
+    const downloadUrl = directServerUrl;
 
-    return { downloadUrl, fileName, blobUrl, directServerUrl };
+    return { downloadUrl, fileName, directServerUrl };
   };
 
   const updateSystemConfig = async (updates: Partial<SystemConfig>) => {
@@ -1085,34 +1124,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
-      // Step 1: Uploading stage
+      // Step 1: Validating APK package
       setUploadProgress({
-        stage: 'uploading',
+        stage: 'validating',
         percentage: 15,
-        details: `Reading ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)...`,
+        details: `Reading & verifying ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)...`,
       });
 
       const buffer = await file.arrayBuffer();
+      const metadata = await inspectApkBinary(buffer, file.name);
 
-      // Simulated transfer progress
-      for (let p = 25; p <= 65; p += 15) {
-        await new Promise((r) => setTimeout(r, 70));
-        setUploadProgress((prev) => ({
-          ...prev,
-          percentage: p,
-          details: `Transferring APK to staging area (${p}%)...`,
-        }));
-      }
-
-      // Step 2: Validating stage
       setUploadProgress({
         stage: 'validating',
-        percentage: 75,
-        details: 'Backend verifying APK structure, package identity, and digital signature...',
+        percentage: 25,
+        details: `Verified ${metadata.packageName} (v${metadata.versionName}). Staging binary transfer...`,
       });
-
-      await new Promise((r) => setTimeout(r, 100));
-      const metadata = await inspectApkBinary(buffer, file.name);
 
       // Find target app if specified, or find by extracted package name, or auto-create!
       let targetApp = specifiedAppId ? apps.find((a) => a.id === specifiedAppId) : null;
@@ -1208,33 +1234,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return false;
       }
 
-      // Step 3: Publishing stage
+      // Step 3: Uploading & Storing stage
       setUploadProgress({
-        stage: 'publishing',
-        percentage: 90,
-        details: 'Atomically promoting new version and storing verified binary...',
+        stage: 'uploading',
+        percentage: 30,
+        details: `Streaming ${file.name} to storage...`,
         verifiedMetadata: metadata,
       });
 
       const newVersionId = `ver_${targetAppId}_${Date.now()}`;
 
-      // Persist the exact original binary blob in Firebase Cloud Storage,
-      // as well as multi-tier IndexedDB, Cache API, Server, and Firestore chunks
+      // Persist the exact original binary blob in server storage and multi-tier caches
       const saveResult = await saveApkBinary(newVersionId, file, {
         appId: targetAppId,
         fileName: file.name,
         sha256: metadata.sha256,
         onProgress: (prog) => {
+          const mappedPct = Math.min(92, 30 + Math.round((prog.percentage || 0) * 0.62));
           setUploadProgress((prev) => ({
             ...prev,
-            percentage: Math.min(95, 75 + Math.round((prog.percentage || 0) * 0.2)),
-            details: `Streaming full-size package to Firebase Cloud Storage (${prog.percentage || 0}%)...`,
+            stage: 'uploading',
+            percentage: mappedPct,
+            details: `Streaming intact package (${prog.percentage || 0}%)...`,
             speedFormatted: prog.speedFormatted,
             etaFormatted: prog.etaFormatted,
             transferredFormatted: prog.transferredFormatted,
           }));
         },
       });
+
+      setUploadProgress((prev) => ({
+        ...prev,
+        stage: 'publishing',
+        percentage: 95,
+        details: 'Package written intact to storage. Registering release in directory...',
+        etaFormatted: '< 1s',
+      }));
 
       const effectiveDownloadUrl =
         saveResult?.cloudResult?.downloadUrl ||
@@ -1311,6 +1346,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         stage: 'completed',
         percentage: 100,
         details: `Successfully verified and published version ${metadata.versionName} (v${metadata.versionCode})!`,
+        speedFormatted: 'Done',
+        etaFormatted: 'Complete',
+        transferredFormatted: `${(file.size / (1024 * 1024)).toFixed(2)} MB / ${(file.size / (1024 * 1024)).toFixed(2)} MB`,
         verifiedMetadata: {
           ...metadata,
           appId: targetAppId,
