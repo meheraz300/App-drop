@@ -78,56 +78,78 @@ export const AppDetailsView: React.FC = () => {
 
   const latestVersion = appVersions.find((v) => v.id === app.latestPublishedVersionId) || appVersions[0];
 
+  const [downloadStage, setDownloadStage] = useState<'idle' | 'downloading' | 'verifying' | 'completed'>('idle');
+  const [downloadStatusText, setDownloadStatusText] = useState<string>('');
+
   const executeDownload = async (versionId: string) => {
     try {
       setDownloadError(null);
       setDownloadingVersionId(versionId);
-      setDownloadProgress(8);
+      setDownloadProgress(5);
+      setDownloadStage('downloading');
+      setDownloadStatusText('Connecting to release package...');
 
-      // Smooth progress animation incrementing towards completion
-      const progressTimer = setInterval(() => {
-        setDownloadProgress((prev) => {
-          if (prev >= 92) return prev;
-          const jump = Math.floor(Math.random() * 14) + 8;
-          return Math.min(prev + jump, 92);
-        });
-      }, 160);
+      const targetVer = appVersions.find((v) => v.id === versionId);
+      if (!targetVer) {
+        throw new Error('Target version record not found.');
+      }
 
-      const { downloadUrl, fileName, directServerUrl } = await requestDownload(app.id, versionId);
+      // Execute verified download workflow:
+      // 1. Retrieves authentic binary
+      // 2. Incremental SHA-256 & byte size calculation
+      // 3. Mathematical check: SHA256(Admin) === SHA256(User) && Size(Admin) === Size(User)
+      // 4. Rejects with error if mismatch
+      const { downloadAndVerifyApk } = await import('../../lib/binaryStorage');
+      const verifiedResult = await downloadAndVerifyApk(
+        { id: app.id, name: app.name },
+        targetVer,
+        (prog) => {
+          setDownloadProgress(prog.percentage);
+          if (prog.stage === 'verifying') {
+            setDownloadStage('verifying');
+            setDownloadStatusText('Verifying cryptographic SHA-256 & byte size...');
+          } else if (prog.stage === 'downloading') {
+            setDownloadStage('downloading');
+            setDownloadStatusText(prog.details || `Downloading package (${prog.percentage}%)...`);
+          } else if (prog.stage === 'completed') {
+            setDownloadStage('completed');
+            setDownloadStatusText('Integrity 100% verified. Triggering save...');
+          }
+        }
+      );
 
-      // Finish progress animation
-      clearInterval(progressTimer);
-      setDownloadProgress(100);
+      // Record download event in stats (fire-and-forget)
+      await requestDownload(app.id, versionId).catch(() => {});
 
-      // Slight delay so the user clearly sees 100% completion before file triggers
+      // Trigger browser save from verified Blob URL
+      const objectUrl = URL.createObjectURL(verifiedResult.blob);
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = verifiedResult.fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+
+      setLastDownloadInfo({
+        fileName: verifiedResult.fileName,
+        directServerUrl: undefined,
+      });
+
+      setShowPostDownloadCard(true);
+
       setTimeout(() => {
-        const targetVer = appVersions.find((v) => v.id === versionId);
-        const resolvedFileName =
-          fileName || formatApkDownloadFileName(app.name, targetVer?.versionName);
-        setLastDownloadInfo({ fileName: resolvedFileName, directServerUrl });
-
-        // Trigger direct server stream so Android DownloadManager receives exact binary headers
-        const downloadLink = directServerUrl || downloadUrl;
-        const anchor = document.createElement('a');
-        anchor.href = downloadLink;
-        anchor.download = resolvedFileName;
-        document.body.appendChild(anchor);
-        anchor.click();
-        document.body.removeChild(anchor);
-
-        // Show helpful mobile installation guidance
-        setShowPostDownloadCard(true);
-
-        // Reset state after completion display
-        setTimeout(() => {
-          setDownloadingVersionId(null);
-          setDownloadProgress(0);
-        }, 900);
-      }, 350);
+        URL.revokeObjectURL(objectUrl);
+        setDownloadingVersionId(null);
+        setDownloadProgress(0);
+        setDownloadStage('idle');
+        setDownloadStatusText('');
+      }, 1200);
     } catch (err: any) {
-      setDownloadError(err.message || 'Failed to initialize download.');
+      setDownloadError(err.message || 'Download verification failed. Aborted for security.');
       setDownloadingVersionId(null);
       setDownloadProgress(0);
+      setDownloadStage('idle');
+      setDownloadStatusText('');
     }
   };
 
@@ -348,7 +370,11 @@ export const AppDetailsView: React.FC = () => {
                         <Loader2 className="h-4 w-4 animate-spin shrink-0" />
                       )}
                       <span className="font-bold text-sm">
-                        {downloadProgress >= 100 ? 'Ready!' : 'Downloading APK...'}
+                        {downloadStage === 'verifying'
+                          ? 'Verifying SHA-256...'
+                          : downloadProgress >= 100
+                          ? 'Verified & Ready!'
+                          : 'Downloading APK...'}
                       </span>
                     </div>
 

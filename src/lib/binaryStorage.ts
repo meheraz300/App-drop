@@ -732,9 +732,11 @@ export async function uploadApkToServer(
 }
 
 /**
+/**
  * Uploads the intact APK binary to Firebase Cloud Storage without truncation or compression.
  * Stores under published/${appId}/${versionId}/${fileName}
  * and returns the official public download URL and storage path.
+ * Guarantees that large files (up to 500 MB) are given ample time to upload with live progress.
  */
 export async function uploadApkToCloudStorage(
   appId: string,
@@ -769,7 +771,7 @@ export async function uploadApkToCloudStorage(
 
     const uploadTask = uploadBytesResumable(storageRef, blob, metadata);
 
-    const taskPromise = new Promise<{ downloadUrl: string; storagePath: string } | null>((resolve) => {
+    return await new Promise<{ downloadUrl: string; storagePath: string } | null>((resolve) => {
       uploadTask.on(
         'state_changed',
         (snapshot) => {
@@ -802,12 +804,15 @@ export async function uploadApkToCloudStorage(
         async () => {
           try {
             if (onProgress) {
+              const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+              const elapsedSec = Math.max(0.01, (now - startTime) / 1000);
+              const speedBytesPerSec = blob.size / elapsedSec;
               onProgress({
                 percentage: 100,
                 loadedBytes: blob.size,
                 totalBytes: blob.size,
-                speedBytesPerSec: 0,
-                speedFormatted: 'Done',
+                speedBytesPerSec,
+                speedFormatted: formatUploadSpeed(speedBytesPerSec),
                 etaSeconds: 0,
                 etaFormatted: 'Complete',
                 transferredFormatted: `${formatByteSize(blob.size)} / ${formatByteSize(blob.size)}`,
@@ -828,20 +833,6 @@ export async function uploadApkToCloudStorage(
         resolve(null);
       });
     });
-
-    // 2.5-second timeout for cloud storage so it never stalls or freezes the primary upload pipeline
-    const timeoutMs = 2500;
-
-    const timeoutPromise = new Promise<{ downloadUrl: string; storagePath: string } | null>((resolve) => {
-      setTimeout(() => {
-        try {
-          uploadTask.cancel();
-        } catch {}
-        resolve(null);
-      }, timeoutMs);
-    });
-
-    return await Promise.race([taskPromise, timeoutPromise]);
   } catch (err) {
     console.warn('uploadApkToCloudStorage note:', err);
     return null;
@@ -854,7 +845,6 @@ export async function uploadApkToCloudStorage(
  * - Firebase Cloud Storage (published/${appId}/${versionId}/${fileName})
  * - Persistent IndexedDB ('AppDropBinaryDB')
  * - Cache Storage API ('appdrop-apk-cache')
- * - Firestore binary chunks (/apkChunks/:versionId/chunks)
  */
 export async function saveApkBinary(
   versionId: string,
@@ -874,7 +864,7 @@ export async function saveApkBinary(
   const totalSize = blob.size;
   const fileName = options?.fileName || (blob instanceof File ? blob.name : `${versionId}.apk`);
 
-  // 1. Store in local IndexedDB immediately (instant preservation of full bytes)
+  // 1. Store in local IndexedDB immediately (instant preservation of full verified bytes)
   try {
     const database = await openDatabase();
     await new Promise<void>((resolve, reject) => {
@@ -907,7 +897,6 @@ export async function saveApkBinary(
   }
 
   // 3 & 4. Concurrently upload to dedicated backend server and Firebase Cloud Storage
-  // Server upload provides real-time byte transfer progress reporting (1% to 100%) with live speed and ETA
   let serverResult: { downloadUrl: string; sizeBytes: number } | null = null;
   let cloudResult: { downloadUrl: string; storagePath: string } | null = null;
 
@@ -925,7 +914,11 @@ export async function saveApkBinary(
         options?.appId
       ),
       options?.appId
-        ? uploadApkToCloudStorage(options.appId, versionId, fileName, blob)
+        ? uploadApkToCloudStorage(options.appId, versionId, fileName, blob, (prog) => {
+            if (options?.onProgress) {
+              options.onProgress(prog);
+            }
+          })
         : Promise.resolve(null),
     ]);
 
@@ -938,9 +931,6 @@ export async function saveApkBinary(
   } catch (err) {
     console.warn('Storage concurrent upload error caught:', err);
   }
-
-  // Note: Full binary is stored in Firebase Cloud Storage, server disk, and IndexedDB.
-  // We do not slice large APKs into Firestore documents to preserve the daily write quota.
 
   const effectiveDownloadUrl =
     cloudResult?.downloadUrl ||
@@ -985,22 +975,83 @@ export async function isBinaryApkValid(blob: Blob): Promise<boolean> {
 }
 
 /**
- * Retrieves the intact APK binary blob for a version across all tiers.
- * Guarantees original byte size is preserved and never reduced to a few kilobytes.
- * Prioritizes genuine server-stored signed packages and purges corrupt local caches.
+ * Mathematically verifies an APK binary against recorded release criteria:
+ * 1. Exact file size in bytes
+ * 2. Cryptographic SHA-256 checksum
+ * 3. Valid Android binary package headers
+ *
+ * NON-NEGOTIABLE CONDITION:
+ * SHA256(Admin Original APK) === SHA256(User Downloaded APK)
+ * AND
+ * Size(Admin Original APK) === Size(User Downloaded APK)
+ */
+export async function verifyApkBinary(
+  blob: Blob,
+  expectedSha256?: string,
+  expectedSizeBytes?: number
+): Promise<{ valid: boolean; actualSha256: string; actualSize: number; error?: string }> {
+  if (!blob) {
+    return { valid: false, actualSha256: '', actualSize: 0, error: 'Binary blob is empty or missing.' };
+  }
+
+  const actualSize = blob.size;
+  if (expectedSizeBytes !== undefined && expectedSizeBytes > 0 && actualSize !== expectedSizeBytes) {
+    return {
+      valid: false,
+      actualSha256: '',
+      actualSize,
+      error: `File size mismatch: Expected ${expectedSizeBytes} bytes (${formatByteSize(expectedSizeBytes)}), but received ${actualSize} bytes (${formatByteSize(actualSize)}). Download rejected for security.`,
+    };
+  }
+
+  const { calculateSha256 } = await import('./apkValidator');
+  const actualSha256 = await calculateSha256(blob);
+
+  if (expectedSha256 && expectedSha256.trim()) {
+    if (actualSha256.toLowerCase() !== expectedSha256.trim().toLowerCase()) {
+      return {
+        valid: false,
+        actualSha256,
+        actualSize,
+        error: `Cryptographic SHA-256 hash mismatch: Expected ${expectedSha256}, but received ${actualSha256}. Download rejected for security.`,
+      };
+    }
+  }
+
+  const isValidFormat = await isBinaryApkValid(blob);
+  if (!isValidFormat) {
+    return {
+      valid: false,
+      actualSha256,
+      actualSize,
+      error: 'Corrupted package: File does not have valid Android ZIP binary archive headers.',
+    };
+  }
+
+  return { valid: true, actualSha256, actualSize };
+}
+
+/**
+ * Retrieves the intact APK binary blob for a version.
+ * STRICT SECURITY INVARIANT:
+ * Zero substitute, template, or synthetic fallbacks are permitted.
+ * If the exact, authentic package cannot be retrieved or fails mathematical verification,
+ * this function throws an explicit Error.
  */
 export async function getApkBinary(
   versionId: string,
   options?: {
     expectedSizeBytes?: number;
+    expectedSha256?: string;
     appName?: string;
     versionName?: string;
     downloadUrl?: string;
   }
 ): Promise<Blob> {
   const expectedSize = options?.expectedSizeBytes || 0;
+  const expectedSha = options?.expectedSha256 || '';
 
-  // Direct Node.js filesystem check for unit tests and SSR
+  // Direct Node.js filesystem check for unit tests and local server environments
   if (typeof window === 'undefined') {
     try {
       const fs = await import('fs');
@@ -1008,17 +1059,46 @@ export async function getApkBinary(
       const uploadFile = path.join(process.cwd(), 'uploads', 'apks', `${versionId}.apk`);
       if (fs.existsSync(uploadFile)) {
         const buf = fs.readFileSync(uploadFile);
-        return new Blob([buf], { type: 'application/vnd.android.package-archive' });
+        const nodeBlob = new Blob([buf], { type: 'application/vnd.android.package-archive' });
+        if (expectedSize > 0 && nodeBlob.size !== expectedSize) {
+          throw new Error(`Size mismatch on server disk: Expected ${expectedSize} bytes, got ${nodeBlob.size}.`);
+        }
+        return nodeBlob;
       }
-      const tPath = path.join(process.cwd(), 'public', 'assets', 'template.apk');
-      if (fs.existsSync(tPath)) {
-        const buf = fs.readFileSync(tPath);
-        return new Blob([buf], { type: 'application/vnd.android.package-archive' });
-      }
-    } catch {}
+    } catch (e: any) {
+      if (e.message?.includes('Size mismatch')) throw e;
+    }
   }
 
-  // Tier 1 (Primary): Fetch authoritative signed APK from backend server endpoint or direct URL
+  // Tier 1: Check local verified IndexedDB cache
+  try {
+    const database = await openDatabase();
+    const idbBlob = await new Promise<Blob | null>((resolve, reject) => {
+      const transaction = database.transaction(STORE_NAME, 'readonly');
+      const store = transaction.objectStore(STORE_NAME);
+      const req = store.get(versionId);
+      req.onsuccess = () => resolve(req.result ? (req.result as Blob) : null);
+      req.onerror = () => reject(req.error);
+      transaction.oncomplete = () => database.close();
+    });
+
+    if (idbBlob && idbBlob.size > 0) {
+      const verification = await verifyApkBinary(idbBlob, expectedSha, expectedSize);
+      if (verification.valid) {
+        return idbBlob;
+      } else {
+        // Purge invalid cached blob
+        console.warn(`[Storage] Purging non-matching or corrupt IndexedDB blob for ${versionId}:`, verification.error);
+        const deleteTx = database.transaction(STORE_NAME, 'readwrite');
+        deleteTx.objectStore(STORE_NAME).delete(versionId);
+        deleteTx.oncomplete = () => database.close();
+      }
+    }
+  } catch (err) {
+    console.warn('IndexedDB retrieval note:', err);
+  }
+
+  // Tier 2: Fetch authoritative package from provided download URL or backend server
   const urlsToTry: string[] = [];
   if (options?.downloadUrl && options.downloadUrl.trim()) {
     const rawUrl = options.downloadUrl.trim();
@@ -1027,10 +1107,11 @@ export async function getApkBinary(
       urlsToTry.push(`/App-drop${rawUrl}`);
     }
   }
+
   const queryParams = new URLSearchParams();
   if (options?.appName) queryParams.set('appName', options.appName);
   if (options?.versionName) queryParams.set('versionName', options.versionName);
-  if (options?.expectedSizeBytes) queryParams.set('size', String(options.expectedSizeBytes));
+  if (expectedSize) queryParams.set('size', String(expectedSize));
   const qs = queryParams.toString() ? `?${queryParams.toString()}` : '';
 
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
@@ -1045,11 +1126,17 @@ export async function getApkBinary(
     try {
       const res = await fetch(url);
       if (res.ok) {
+        // Guard against HTML error pages being returned as APKs
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('text/html')) {
+          continue;
+        }
+
         const fetchedBlob = await res.blob();
-        if (fetchedBlob && fetchedBlob.size > 1024) {
-          const isValid = await isBinaryApkValid(fetchedBlob);
-          if (isValid) {
-            // Cache verified valid binary in IndexedDB and Cache API
+        if (fetchedBlob && fetchedBlob.size > 0) {
+          const verification = await verifyApkBinary(fetchedBlob, expectedSha, expectedSize);
+          if (verification.valid) {
+            // Cache verified valid binary in IndexedDB
             try {
               const database = await openDatabase();
               const transaction = database.transaction(STORE_NAME, 'readwrite');
@@ -1057,162 +1144,146 @@ export async function getApkBinary(
               transaction.oncomplete = () => database.close();
             } catch {}
 
-            try {
-              if (typeof caches !== 'undefined') {
-                const cache = await caches.open(CACHE_NAME);
-                const response = new Response(fetchedBlob, {
-                  headers: {
-                    'Content-Type': 'application/vnd.android.package-archive',
-                    'Content-Length': String(fetchedBlob.size),
-                  },
-                });
-                await cache.put(`/api/apks/${versionId}/download`, response);
-              }
-            } catch {}
-
             return fetchedBlob;
+          } else {
+            console.warn(`[Storage] Binary downloaded from ${url} failed integrity verification:`, verification.error);
           }
         }
       }
     } catch {}
   }
 
-  // Tier 2: Check local IndexedDB with integrity verification
+  // Tier 3: Fetch directly from Firebase Storage reference if initialized
   try {
-    const database = await openDatabase();
-    const idbBlob = await new Promise<Blob | null>((resolve, reject) => {
-      const transaction = database.transaction(STORE_NAME, 'readonly');
-      const store = transaction.objectStore(STORE_NAME);
-      const req = store.get(versionId);
-      req.onsuccess = () => resolve(req.result ? (req.result as Blob) : null);
-      req.onerror = () => reject(req.error);
-      transaction.oncomplete = () => database.close();
-    });
-
-    if (idbBlob && idbBlob.size > 0) {
-      const isValid = await isBinaryApkValid(idbBlob);
-      if (isValid && (!expectedSize || idbBlob.size >= expectedSize)) {
-        return idbBlob;
-      } else {
-        // Purge corrupted or truncated blob from IndexedDB to avoid repeated parse errors
-        console.warn(`[Storage] Purging corrupted or truncated IndexedDB blob for ${versionId}`);
-        const deleteTx = database.transaction(STORE_NAME, 'readwrite');
-        deleteTx.objectStore(STORE_NAME).delete(versionId);
-        deleteTx.oncomplete = () => database.close();
-      }
-    }
-  } catch (err) {
-    console.warn('IndexedDB retrieval note:', err);
-  }
-
-  // Tier 3: Check Cache Storage API with integrity verification
-  try {
-    if (typeof caches !== 'undefined') {
-      const cache = await caches.open(CACHE_NAME);
-      const matched = await cache.match(`/api/apks/${versionId}/download`);
-      if (matched) {
-        const cachedBlob = await matched.blob();
-        if (cachedBlob && cachedBlob.size > 0) {
-          const isValid = await isBinaryApkValid(cachedBlob);
-          if (isValid && (!expectedSize || cachedBlob.size >= expectedSize)) {
-            return cachedBlob;
-          } else {
-            await cache.delete(`/api/apks/${versionId}/download`);
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.warn('Cache API retrieval note:', err);
-  }
-
-  // Tier 4: Fetch binary chunks from Firestore (legacy fallback with 1.2s timeout)
-  try {
-    const fsContext = await getFirestoreContext();
-    if (fsContext && fsContext.db) {
-      const { db, collection, query, orderBy, getDocs } = fsContext;
-      const chunksQuery = query(
-        collection(db, 'apkChunks', versionId, 'chunks'),
-        orderBy('chunkIndex', 'asc')
-      );
-      const snapshot = await Promise.race([
-        getDocs(chunksQuery),
-        new Promise<any>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 1200)),
-      ]).catch(() => null);
-
-      if (snapshot && !snapshot.empty) {
-        const chunkDocs = snapshot.docs.map((d: any) => d.data());
-        const totalChunks = chunkDocs[0]?.totalChunks || chunkDocs.length;
-
-        if (chunkDocs.length === totalChunks) {
-          const byteArrays: Uint8Array[] = [];
-          let combinedLen = 0;
-
-          for (const c of chunkDocs) {
-            if (c.data) {
-              const u8 = base64ToUint8Array(c.data);
-              byteArrays.push(u8);
-              combinedLen += u8.byteLength;
+    const { storage } = await import('./firebase');
+    const { ref, getDownloadURL } = await import('firebase/storage');
+    if (storage) {
+      const candidatePaths = [
+        `published/${versionId}.apk`,
+      ];
+      for (const p of candidatePaths) {
+        try {
+          const fileRef = ref(storage, p);
+          const cloudUrl = await getDownloadURL(fileRef);
+          if (cloudUrl) {
+            const res = await fetch(cloudUrl);
+            if (res.ok) {
+              const cloudBlob = await res.blob();
+              const verification = await verifyApkBinary(cloudBlob, expectedSha, expectedSize);
+              if (verification.valid) {
+                return cloudBlob;
+              }
             }
           }
-
-          const combined = new Uint8Array(combinedLen);
-          let offset = 0;
-          for (const arr of byteArrays) {
-            combined.set(arr, offset);
-            offset += arr.byteLength;
-          }
-
-          const reassembledBlob = new Blob([combined], {
-            type: 'application/vnd.android.package-archive',
-          });
-
-          if (await isBinaryApkValid(reassembledBlob)) {
-            try {
-              const database = await openDatabase();
-              const transaction = database.transaction(STORE_NAME, 'readwrite');
-              transaction.objectStore(STORE_NAME).put(reassembledBlob, versionId);
-              transaction.oncomplete = () => database.close();
-            } catch {}
-
-            return reassembledBlob;
-          }
-        }
+        } catch {}
       }
     }
-  } catch (chunkFetchErr) {
-    console.warn('Firestore chunk retrieval note:', chunkFetchErr);
-  }
+  } catch {}
 
-  // Tier 5: Fetch genuine signed APK template from static assets
-  const templateUrls = [
-    '/App-drop/assets/template.apk',
-    '/assets/template.apk',
-    typeof window !== 'undefined' && window.location.origin ? `${window.location.origin}/App-drop/assets/template.apk` : '',
-    typeof window !== 'undefined' && window.location.origin ? `${window.location.origin}/assets/template.apk` : '',
-  ].filter(Boolean);
-  for (const tUrl of templateUrls) {
-    try {
-      const tRes = await fetch(tUrl);
-      if (tRes.ok) {
-        const tBlob = await tRes.blob();
-        if (tBlob && tBlob.size > 1024 && (await isBinaryApkValid(tBlob))) {
-          return tBlob;
-        }
-      }
-    } catch {}
-  }
-
-  // Tier 6: Fallback intact ZIP synthesis with binary AXML and valid DEX matching the expected byte length
-  const targetBytes = Math.max(expectedSize, 15 * 1024 * 1024);
-  const intactBlob = generateIntactApkBlob(
-    options?.appName || 'AppDrop Application',
-    options?.versionName || '1.0.0',
-    targetBytes
+  // STRICT INVARIANT: If the exact verified APK cannot be retrieved, THROW AN ERROR.
+  // Under NO circumstances do we fall back to a calculator template or synthetic APK!
+  throw new Error(
+    `APK_NOT_FOUND: The authentic APK package for version "${versionId}" could not be retrieved from verified storage. Please ensure the administrator uploaded the release package.`
   );
-
-  return intactBlob;
 }
+
+export interface DownloadVerificationProgress {
+  loadedBytes: number;
+  totalBytes: number;
+  percentage: number;
+  speedFormatted?: string;
+  stage: 'preparing' | 'downloading' | 'verifying' | 'completed' | 'error';
+  details?: string;
+}
+
+/**
+ * Complete, secure end-to-end user APK download and verification workflow.
+ * 1. Validates version status is published
+ * 2. Validates integrity metadata (SHA-256 and byte size)
+ * 3. Streams original binary from storage
+ * 4. Calculates cryptographic SHA-256 and byte size of downloaded payload
+ * 5. Rejects download if SHA-256 or byte size does not match admin uploaded original
+ * 6. Triggers local browser download ONLY after 100% verification
+ */
+export async function downloadAndVerifyApk(
+  app: { id: string; name: string },
+  version: {
+    id: string;
+    versionName: string;
+    apkSizeBytes: number;
+    sha256: string;
+    downloadUrl?: string;
+    apkPath?: string;
+    status: string;
+  },
+  onProgress?: (progress: DownloadVerificationProgress) => void
+): Promise<{ blob: Blob; fileName: string; verifiedSha256: string; verifiedSize: number }> {
+  const { formatApkDownloadFileName } = await import('./downloadHelper');
+  const fileName = formatApkDownloadFileName(app.name, version.versionName);
+
+  // 1. Verify publication status
+  if (version.status !== 'published') {
+    throw new Error(`Cannot download unpublished application version (status: ${version.status}).`);
+  }
+
+  // 2. Verify integrity metadata
+  if (!version.sha256 || version.sha256.length !== 64 || !version.apkSizeBytes || version.apkSizeBytes <= 0) {
+    throw new Error('Missing or invalid integrity metadata for this version. Download rejected for security.');
+  }
+
+  if (onProgress) {
+    onProgress({
+      loadedBytes: 0,
+      totalBytes: version.apkSizeBytes,
+      percentage: 5,
+      stage: 'preparing',
+      details: `Connecting to authoritative release for ${app.name} (v${version.versionName})...`,
+    });
+  }
+
+  // 3. Retrieve binary with strict verification
+  const blob = await getApkBinary(version.id, {
+    expectedSizeBytes: version.apkSizeBytes,
+    expectedSha256: version.sha256,
+    appName: app.name,
+    versionName: version.versionName,
+    downloadUrl: version.downloadUrl,
+  });
+
+  if (onProgress) {
+    onProgress({
+      loadedBytes: blob.size,
+      totalBytes: version.apkSizeBytes,
+      percentage: 85,
+      stage: 'verifying',
+      details: 'Verifying cryptographic SHA-256 checksum and exact byte count...',
+    });
+  }
+
+  // 4. Mathematical verification
+  const verification = await verifyApkBinary(blob, version.sha256, version.apkSizeBytes);
+  if (!verification.valid) {
+    throw new Error(verification.error || 'Integrity verification failed. Download rejected for security.');
+  }
+
+  if (onProgress) {
+    onProgress({
+      loadedBytes: blob.size,
+      totalBytes: version.apkSizeBytes,
+      percentage: 100,
+      stage: 'completed',
+      details: `100% Verified! SHA-256 matches admin original (${version.sha256.slice(0, 8)}...).`,
+    });
+  }
+
+  return {
+    blob,
+    fileName,
+    verifiedSha256: verification.actualSha256,
+    verifiedSize: verification.actualSize,
+  };
+}
+
 
 /**
  * Permanently erases APK files associated with an application or specific version from Firebase Cloud Storage.

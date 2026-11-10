@@ -62,13 +62,228 @@ export function validateVersionCode(
 }
 
 /**
- * Calculates SHA-256 hash of an ArrayBuffer in browser or Node environments.
+ * RFC 6234 compliant SHA-256 incremental hasher for streaming large APK files (up to 500 MB)
+ * without exhausting browser memory or blocking UI threads.
  */
-export async function calculateSha256(buffer: ArrayBuffer): Promise<string> {
-  // Browser Web Crypto API
+export class Sha256Incremental {
+  private h0 = 0x6a09e667;
+  private h1 = 0xbb67ae85;
+  private h2 = 0x3c6ef372;
+  private h3 = 0xa54ff53a;
+  private h4 = 0x510e527f;
+  private h5 = 0x9b05688c;
+  private h6 = 0x1f83d9ab;
+  private h7 = 0x5be0cd19;
+
+  private buffer: Uint8Array = new Uint8Array(64);
+  private bufferLength = 0;
+  private totalBytesHashed = 0;
+
+  private static readonly K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ]);
+
+  private static readonly W = new Uint32Array(64);
+
+  private processBlock(block: Uint8Array, offset: number) {
+    const W = Sha256Incremental.W;
+    const K = Sha256Incremental.K;
+
+    for (let t = 0; t < 16; t++) {
+      const idx = offset + t * 4;
+      W[t] = ((block[idx] << 24) | (block[idx + 1] << 16) | (block[idx + 2] << 8) | block[idx + 3]) >>> 0;
+    }
+
+    for (let t = 16; t < 64; t++) {
+      const w15 = W[t - 2];
+      const s1 = ((w15 >>> 17) | (w15 << 15)) ^ ((w15 >>> 19) | (w15 << 13)) ^ (w15 >>> 10);
+      const w2 = W[t - 15];
+      const s0 = ((w2 >>> 7) | (w2 << 25)) ^ ((w2 >>> 18) | (w2 << 14)) ^ (w2 >>> 3);
+      W[t] = ((W[t - 16] + s0) + (W[t - 7] + s1)) >>> 0;
+    }
+
+    let a = this.h0;
+    let b = this.h1;
+    let c = this.h2;
+    let d = this.h3;
+    let e = this.h4;
+    let f = this.h5;
+    let g = this.h6;
+    let h = this.h7;
+
+    for (let t = 0; t < 64; t++) {
+      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = ((h + S1) + (ch + K[t]) + W[t]) >>> 0;
+      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    this.h0 = (this.h0 + a) >>> 0;
+    this.h1 = (this.h1 + b) >>> 0;
+    this.h2 = (this.h2 + c) >>> 0;
+    this.h3 = (this.h3 + d) >>> 0;
+    this.h4 = (this.h4 + e) >>> 0;
+    this.h5 = (this.h5 + f) >>> 0;
+    this.h6 = (this.h6 + g) >>> 0;
+    this.h7 = (this.h7 + h) >>> 0;
+  }
+
+  public update(data: Uint8Array): void {
+    let offset = 0;
+    const len = data.length;
+    this.totalBytesHashed += len;
+
+    if (this.bufferLength > 0) {
+      const needed = 64 - this.bufferLength;
+      if (len >= needed) {
+        this.buffer.set(data.subarray(0, needed), this.bufferLength);
+        this.processBlock(this.buffer, 0);
+        offset = needed;
+        this.bufferLength = 0;
+      } else {
+        this.buffer.set(data, this.bufferLength);
+        this.bufferLength += len;
+        return;
+      }
+    }
+
+    while (offset + 64 <= len) {
+      this.processBlock(data, offset);
+      offset += 64;
+    }
+
+    if (offset < len) {
+      const remaining = data.subarray(offset);
+      this.buffer.set(remaining, 0);
+      this.bufferLength = remaining.length;
+    }
+  }
+
+  public digest(): string {
+    const totalBits = this.totalBytesHashed * 8;
+    this.buffer[this.bufferLength] = 0x80;
+    this.bufferLength++;
+
+    if (this.bufferLength > 56) {
+      this.buffer.fill(0, this.bufferLength, 64);
+      this.processBlock(this.buffer, 0);
+      this.bufferLength = 0;
+    }
+
+    this.buffer.fill(0, this.bufferLength, 56);
+    const high = Math.floor(totalBits / 0x100000000);
+    const low = totalBits >>> 0;
+    const view = new DataView(this.buffer.buffer, this.buffer.byteOffset, 64);
+    view.setUint32(56, high, false);
+    view.setUint32(60, low, false);
+    this.processBlock(this.buffer, 0);
+
+    const parts = [this.h0, this.h1, this.h2, this.h3, this.h4, this.h5, this.h6, this.h7];
+    return parts.map((n) => (n >>> 0).toString(16).padStart(8, '0')).join('');
+  }
+}
+
+/**
+ * Calculates SHA-256 hash of an ArrayBuffer, Uint8Array, Blob, or File in browser or Node environments.
+ * Uses hardware-accelerated WebCrypto where available, streams large Blobs in chunks to avoid memory exhaustion,
+ * and falls back gracefully in Node.js test environments.
+ */
+export async function calculateSha256(
+  input: ArrayBuffer | Uint8Array | Blob | File,
+  onProgress?: (progressPct: number) => void
+): Promise<string> {
+  // If input is Blob/File:
+  if (typeof Blob !== 'undefined' && input instanceof Blob) {
+    const size = input.size;
+
+    // Small Blobs (< 16 MB) with Web Crypto: fast path
+    if (size <= 16 * 1024 * 1024 && typeof crypto !== 'undefined' && crypto.subtle && crypto.subtle.digest) {
+      const buf = await input.arrayBuffer();
+      const hashBuffer = await crypto.subtle.digest('SHA-256', buf);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      if (onProgress) onProgress(100);
+      return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    // Node.js crypto fast streaming path
+    if (typeof window === 'undefined') {
+      try {
+        const mod = 'node:crypto';
+        const nodeCrypto = await import(/* @vite-ignore */ mod);
+        const hash = nodeCrypto.createHash('sha256');
+        const chunkSize = 2 * 1024 * 1024; // 2 MB chunks
+        let offset = 0;
+        while (offset < size) {
+          const chunk = input.slice(offset, Math.min(offset + chunkSize, size));
+          const chunkBuf = await chunk.arrayBuffer();
+          hash.update(Buffer.from(chunkBuf));
+          offset += chunkSize;
+          if (onProgress) onProgress(Math.min(100, Math.round((offset / size) * 100)));
+        }
+        return hash.digest('hex');
+      } catch {}
+    }
+
+    // Browser incremental streaming path for large Blobs (up to 500 MB)
+    const hasher = new Sha256Incremental();
+    const chunkSize = 2 * 1024 * 1024; // 2 MB chunks
+    let offset = 0;
+    while (offset < size) {
+      const slice = input.slice(offset, Math.min(offset + chunkSize, size));
+      const chunkBuf = await slice.arrayBuffer();
+      hasher.update(new Uint8Array(chunkBuf));
+      offset += chunkSize;
+      if (onProgress) onProgress(Math.min(100, Math.round((offset / size) * 100)));
+    }
+    return hasher.digest();
+  }
+
+  // Input is ArrayBuffer or Uint8Array
+  let rawBuf: ArrayBuffer;
+  let u8: Uint8Array;
+
+  if (input instanceof Uint8Array) {
+    u8 = input;
+    rawBuf = input.buffer as ArrayBuffer;
+  } else if (input instanceof ArrayBuffer) {
+    rawBuf = input;
+    u8 = new Uint8Array(input);
+  } else {
+    u8 = new Uint8Array(input as unknown as ArrayBuffer);
+    rawBuf = u8.buffer as ArrayBuffer;
+  }
+
+  // Web Crypto
   if (typeof crypto !== 'undefined' && crypto.subtle && crypto.subtle.digest) {
-    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', rawBuf);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
+    if (onProgress) onProgress(100);
     return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
@@ -76,21 +291,15 @@ export async function calculateSha256(buffer: ArrayBuffer): Promise<string> {
   try {
     const mod = 'node:crypto';
     const nodeCrypto = await import(/* @vite-ignore */ mod);
-    return nodeCrypto.createHash('sha256').update(Buffer.from(buffer)).digest('hex');
-  } catch {
-    // Basic deterministic fallback
-    let h1 = 0xdeadbeef;
-    let h2 = 0x41c6ce57;
-    const view = new Uint8Array(buffer);
-    for (let i = 0; i < view.length; i++) {
-      h1 = Math.imul(h1 ^ view[i], 2654435761);
-      h2 = Math.imul(h2 ^ view[i], 1597334677);
-    }
-    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-    const hashStr = (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0');
-    return (hashStr + hashStr + hashStr + hashStr).slice(0, 64);
-  }
+    if (onProgress) onProgress(100);
+    return nodeCrypto.createHash('sha256').update(Buffer.from(u8)).digest('hex');
+  } catch {}
+
+  // Pure JS incremental hasher fallback
+  const hasher = new Sha256Incremental();
+  hasher.update(u8);
+  if (onProgress) onProgress(100);
+  return hasher.digest();
 }
 
 /**

@@ -1,0 +1,615 @@
+# COMPLETE APPDROP WEBSITE AUDIT, BUG FIX & APK BINARY INTEGRITY IMPLEMENTATION
+
+## ROLE
+
+Act as a Senior Full-Stack Software Engineer, Firebase Architect, Security Engineer, and APK Binary Integrity Specialist.
+
+You are working on my existing AppDrop Android Application Distribution Website.
+
+Your responsibility is to inspect the entire existing project, identify all relevant bugs, implement the necessary fixes directly in the source code, and verify that the complete application works correctly.
+
+IMPORTANT: Do not just explain the problems or provide recommendations. You must actually modify the existing codebase and implement the fixes.
+
+---
+
+# 1. PRIMARY OBJECTIVE — EXACT ORIGINAL APK DELIVERY
+
+This is the highest-priority requirement of the entire project.
+
+The APK uploaded by the Admin must be exactly the same APK received by the User.
+
+No different APK, template APK, generated APK, cached APK from another version, modified APK, or substitute file is acceptable.
+
+The system must mathematically verify the identity of the uploaded and downloaded APK using:
+
+1. SHA-256 Hash.
+2. Exact File Size in Bytes.
+
+The final acceptance condition is:
+
+SHA256(Admin Original APK) === SHA256(User Downloaded APK)
+
+AND
+
+Size(Admin Original APK) === Size(User Downloaded APK)
+
+Both conditions must pass.
+
+If either condition fails, reject the download.
+
+---
+
+# 2. COMPLETE PROJECT SOURCE CODE AUDIT
+
+Before making changes, inspect the entire existing project.
+
+Do not assume that the existing implementation is correct.
+
+Trace the complete application workflow:
+
+Admin Panel → APK Upload → Firebase Storage → Firestore Metadata → Publish → Public App Details → User Download → APK Verification.
+
+Inspect all relevant files, components, services, utilities, configuration files, Firebase rules, API routes, deployment workflows, and tests.
+
+Pay particular attention to:
+
+- src/lib/binaryStorage.ts
+- src/lib/downloadHelper.ts
+- src/context/AppContext.tsx
+- src/components/admin/ApkUploader.tsx
+- src/components/admin/AppManager.tsx
+- src/components/public/AppDetailsView.tsx
+- src/lib/apkValidator.ts
+- src/lib/firebase.ts
+- firestore.rules
+- storage.rules
+- server.ts
+- .github/workflows/deploy.yml
+- Existing APK lifecycle and download tests.
+
+These are important starting points, not the complete list. Inspect any other files connected to the same workflow.
+
+Identify the root cause of each issue before modifying the implementation.
+
+---
+
+# 3. FIX THE ADMIN APK UPLOAD SYSTEM
+
+The Admin must be able to upload the original APK reliably.
+
+Implement the following:
+
+### 3.1 Original File Validation
+
+Before uploading:
+
+- Validate the .apk extension.
+- Validate that the selected file is not empty.
+- Validate the maximum allowed file size.
+- Validate APK structure using an appropriate APK validation method.
+- Record the original filename.
+- Record the exact file size in bytes.
+- Calculate the original file's SHA-256 hash.
+
+Do not treat a filename or file extension as proof of APK integrity.
+
+### 3.2 Firebase Storage Upload
+
+- Upload the original binary directly to Firebase Storage.
+- Do not rebuild, modify, repackage, or replace the APK.
+- Use a unique and predictable Storage path associated with the correct app and version.
+- Wait for the upload operation to complete.
+- Do not treat an upload-start event as a successful upload.
+- Retrieve the uploaded object and verify that it contains the expected original binary.
+- Compare the uploaded object's SHA-256 and file size with the original file.
+
+For large APK files, implement an efficient hashing approach that does not unnecessarily freeze the browser or exhaust memory. Use an appropriate incremental SHA-256 implementation or Web Worker where necessary.
+
+### 3.3 Upload Success Conditions
+
+The Admin upload operation is successful ONLY when:
+
+- Firebase Storage upload completes.
+- The uploaded file is accessible.
+- The uploaded file's SHA-256 matches the original.
+- The uploaded file size matches the original.
+
+If any condition fails:
+
+- Mark the upload as failed.
+- Do not publish the version.
+- Do not create misleading success messages.
+- Show a clear error.
+- Allow a safe retry.
+
+---
+
+# 4. FIX FIRESTORE METADATA AND DATA CONSISTENCY
+
+Firestore must store the correct metadata for each uploaded APK.
+
+Store and maintain:
+
+- App ID
+- Version ID
+- Original filename
+- Firebase Storage path
+- SHA-256 hash
+- Exact file size in bytes
+- Version name
+- Upload timestamp
+- Publication status
+- Verification status
+- Relevant download metadata
+
+### Important Rules
+
+- Firestore metadata must refer to the exact Storage object.
+- Do not store a fake or temporary download URL as a verified APK location.
+- Do not mark an APK as published before successful binary verification.
+- Do not allow metadata from one app or version to point to another app's APK.
+- Keep metadata and Storage object updates consistent.
+- Handle interrupted uploads and failed publishing operations safely.
+
+If an upload fails, the existing published version must remain unaffected.
+
+If a new version fails verification, do not replace the previous valid published version.
+
+---
+
+# 5. REMOVE ALL FAKE APK AND SUBSTITUTE FALLBACK SYSTEMS
+
+This is a critical requirement.
+
+Inspect the entire project and eliminate every fallback that can accidentally deliver a different APK.
+
+Specifically inspect and remove or disable unsafe usage of:
+
+- template.apk
+- generateIntactApkBlob()
+- Synthetic APK generation
+- Demo APK files
+- Hardcoded APK URLs
+- Default APK fallback URLs
+- Incorrect IndexedDB APK fallback
+- Incorrect Cache Storage APK fallback
+- Old Firestore chunk fallback
+- Any fallback that can return an APK belonging to another app or version
+- Any code that reports successful download without verifying the original APK.
+
+Do not simply remove every caching feature blindly.
+
+You may retain caching only if every cached object is securely associated with the correct app ID, version ID, SHA-256, and file size, and is reverified before delivery.
+
+If the original APK is unavailable, return an error.
+
+Never provide a substitute APK under any circumstances.
+
+---
+
+# 6. IMPLEMENT USER DOWNLOAD INTEGRITY VERIFICATION
+
+Fix the complete User download workflow.
+
+The User must receive the exact binary uploaded by the Admin.
+
+### Download Process
+
+1. User opens a published app version.
+2. Application retrieves the correct version metadata from Firestore.
+3. Application verifies that the version is published and has valid integrity metadata.
+4. Application retrieves the exact corresponding APK from Firebase Storage.
+5. Application obtains the downloaded binary.
+6. Calculate its SHA-256 hash.
+7. Compare the calculated hash with the Admin-verified SHA-256 hash.
+8. Compare the downloaded file size with the Admin-recorded file size.
+9. Only after both checks pass, allow the file to be saved or downloaded.
+
+### Download Failure Conditions
+
+Reject the download if:
+
+- The APK is missing.
+- The Storage path is incorrect.
+- The APK belongs to another version.
+- SHA-256 does not match.
+- File size does not match.
+- The file is corrupted or incomplete.
+- The version is unpublished.
+- Integrity metadata is missing or invalid.
+
+Never silently switch to another APK.
+
+Never display a successful download message before verification is complete.
+
+### Download Filename
+
+Use the correct original filename or a safe filename derived from the verified version metadata.
+
+Do not change the APK binary itself just to change its filename.
+
+### Download Integrity UI
+
+Provide clear status messages:
+
+- Preparing download
+- Downloading APK
+- Verifying file integrity
+- Verification successful
+- Download failed
+- SHA-256 mismatch
+- File size mismatch
+- APK unavailable
+
+Preserve the existing visual design and use its existing UI components.
+
+---
+
+# 7. FIX THE GITHUB PAGES AND EXPRESS BACKEND ARCHITECTURE
+
+The current project uses:
+
+- GitHub Repository for source code.
+- GitHub Actions for automated build and deployment.
+- GitHub Pages for public frontend hosting.
+- Firebase Firestore for metadata.
+- Firebase Storage for APK binaries.
+
+IMPORTANT:
+
+GitHub Pages is static hosting. It cannot execute an Express backend.
+
+Inspect server.ts and all API calls, especially:
+
+- /api/apks/upload
+- /api/apks/:versionId/download
+- /api/apks/:versionId/status
+
+Determine whether these endpoints are actually available in the deployed production environment.
+
+Do not assume they work merely because they work locally.
+
+### Required Implementation
+
+- Make the deployed frontend compatible with GitHub Pages.
+- Do not depend on an Express endpoint that is not deployed.
+- Prefer direct Firebase Storage binary retrieval when appropriate.
+- Ensure that the correct Storage object is retrieved for every app version.
+- Remove unnecessary proxy dependencies.
+- If an Express backend is genuinely required, only use it when a separately deployed and configured backend exists.
+- Do not introduce a new backend unnecessarily.
+
+The final solution must work with the actual deployment architecture.
+
+---
+
+# 8. FIX THE UPLOAD TIMEOUT AND CLOUD STORAGE FAILURE HANDLING
+
+Inspect uploadApkToCloudStorage() and all related upload functions.
+
+Pay particular attention to the existing 2.5-second timeout and fallback behavior.
+
+Implement:
+
+- Proper upload completion handling.
+- Reliable progress tracking.
+- Appropriate timeout and retry handling.
+- Correct cancellation behavior.
+- Network failure handling.
+- Upload state management.
+- Safe cleanup of incomplete uploads.
+- Verification after upload.
+
+Do not use a short arbitrary timeout that causes a successful large-file upload to be treated as failed.
+
+Do not silently switch to another storage mechanism when Firebase Storage upload fails.
+
+A failed upload must remain a failed upload.
+
+---
+
+# 9. FIX ADMIN PUBLISHING AND VERSION MANAGEMENT
+
+Inspect AppManager.tsx, ApkUploader.tsx, and AppContext.tsx.
+
+Implement the correct publishing lifecycle:
+
+Selected APK → Validated → Hashed → Uploaded → Storage Verified → Firestore Metadata Saved → Published
+
+Publishing must not happen before all required verification steps succeed.
+
+### Required Behavior
+
+- Admin can upload a new APK.
+- Admin can update an existing app version according to the existing product rules.
+- Admin can publish a verified version.
+- Admin can unpublish a version.
+- Admin can delete a version safely.
+- Admin can view upload and verification status.
+- Admin can see the stored file size and SHA-256.
+- Failed uploads must not corrupt existing published versions.
+- Failed updates must not break the previous working version.
+- Users must only see and download published versions.
+
+Preserve existing version-management functionality.
+
+---
+
+# 10. FIX FIREBASE SECURITY RULES
+
+Inspect both Firestore and Firebase Storage security rules.
+
+Do not trust frontend UI restrictions as security protection.
+
+### Admin Permissions
+
+Only authenticated and authorized Admins should be able to:
+
+- Upload APK files.
+- Update APK objects.
+- Delete APK files.
+- Publish or unpublish versions.
+- Modify protected APK metadata.
+
+Use a secure Admin authorization method, such as trusted custom claims or a properly restricted Admin allowlist.
+
+Do not rely only on a client-side email comparison.
+
+### Public User Permissions
+
+Public users should be able to:
+
+- Read publicly available app metadata.
+- Read metadata for published versions.
+- Download APKs belonging to published versions.
+
+Public users must not be able to:
+
+- Upload APKs.
+- Replace APKs.
+- Delete APKs.
+- Modify SHA-256 metadata.
+- Modify file size metadata.
+- Publish unpublished versions.
+- Access unpublished APKs.
+
+Ensure Storage rules correctly enforce the relationship between the requested APK and its published Firestore metadata where supported.
+
+Never expose Firebase Admin SDK credentials or privileged secrets in frontend code.
+
+---
+
+# 11. REVIEW FIREBASE STORAGE URL AND DOWNLOAD SECURITY
+
+Inspect how Firebase Storage download URLs are generated and used.
+
+Requirements:
+
+- Use the correct Storage object reference.
+- Never construct a URL using untrusted metadata.
+- Ensure the download URL refers to the exact verified APK.
+- Do not treat a Firebase download token as a substitute for authorization.
+- Do not expose unpublished APKs through public links.
+- Avoid storing unnecessary long-lived download links in multiple places.
+- Ensure deleted or unpublished files cannot continue to be accessed through an unintended public route.
+
+Choose an implementation compatible with Firebase Storage and GitHub Pages.
+
+---
+
+# 12. FIX APP DETAILS AND PUBLIC WEBSITE DOWNLOAD FLOW
+
+Inspect AppDetailsView.tsx and all connected public components.
+
+Ensure:
+
+- The displayed app version matches the APK being downloaded.
+- The displayed file size matches the actual APK size.
+- The download action uses the correct version ID.
+- The correct Storage path is used.
+- A different version cannot accidentally be downloaded.
+- An unavailable APK displays a clear error.
+- Download progress and verification status are accurate.
+- The user cannot download an unpublished version.
+- The website never reports success for an unverified APK.
+
+Do not break existing app details, screenshots, descriptions, categories, search, or other public features.
+
+---
+
+# 13. REVIEW THE COMPLETE WEBSITE FOR RELATED BUGS
+
+Do not limit the audit to the files listed above.
+
+Inspect the entire project for bugs related to:
+
+- Admin authentication.
+- Admin authorization.
+- App upload.
+- APK validation.
+- Version management.
+- Firebase Storage.
+- Firestore data consistency.
+- Public app listing.
+- App details.
+- Download functionality.
+- Download progress.
+- Download history.
+- Search and category filtering.
+- Error handling.
+- Loading states.
+- Mobile responsiveness.
+- GitHub Pages routing.
+- Build configuration.
+- Deployment workflow.
+- Storage security.
+- Data cleanup.
+- Duplicate records.
+- Race conditions.
+- Broken API dependencies.
+
+Fix any confirmed bugs that directly affect existing functionality or the reliability and security of the APK lifecycle.
+
+Do not make unrelated feature changes or introduce unnecessary complexity.
+
+---
+
+# 14. TESTING AND VERIFICATION — MANDATORY
+
+Do not finish the task just because the code compiles.
+
+Run the existing test suite and add the missing tests.
+
+At minimum, verify the following scenarios:
+
+### Upload Tests
+
+1. Valid original APK uploads successfully.
+2. Original SHA-256 is calculated correctly.
+3. Original file size is recorded correctly.
+4. Uploaded Storage object matches the original hash.
+5. Uploaded Storage object matches the original size.
+6. Failed upload does not publish the version.
+7. Failed verification does not replace the previous published version.
+
+### Download Tests
+
+8. User receives the exact original APK.
+9. Downloaded SHA-256 matches the original.
+10. Downloaded file size matches the original.
+11. Different APK with the same filename is rejected.
+12. Different APK with the same file size but a different hash is rejected.
+13. Corrupted APK is rejected.
+14. Incomplete APK is rejected.
+15. Missing APK produces an error.
+16. Unpublished APK cannot be downloaded.
+17. Missing integrity metadata does not bypass verification.
+18. No fallback APK is returned.
+19. Failed verification never produces a success message.
+
+### Deployment Tests
+
+20. Production build succeeds.
+21. GitHub Pages frontend does not depend on an unavailable Express API.
+22. Firebase Storage download works with the actual configured production architecture.
+23. Public users cannot modify protected APK data.
+24. Unauthorized users cannot upload or delete APK files.
+
+Use real test APK fixtures where possible.
+
+Do not claim a real production download was verified unless you actually performed that test against the deployed environment.
+
+---
+
+# 15. PRESERVE THE EXISTING WEBSITE DESIGN
+
+This is extremely important.
+
+I do not want a new website.
+
+I do not want a UI redesign.
+
+Preserve:
+
+- Existing AppDrop branding.
+- Existing logo.
+- Existing colors.
+- Existing theme.
+- Existing Light and Dark modes.
+- Existing Liquid Glass design language.
+- Existing typography.
+- Existing buttons.
+- Existing cards.
+- Existing navigation.
+- Existing Admin Panel layout.
+- Existing Public Website layout.
+- Existing responsive design.
+- Existing features and workflows.
+
+Only modify the UI when necessary to display accurate upload, verification, error, or download statuses.
+
+Do not remove existing functionality to make the implementation easier.
+
+---
+
+# 16. CODE QUALITY AND IMPLEMENTATION RULES
+
+- Inspect before modifying.
+- Fix root causes instead of hiding symptoms.
+- Reuse existing architecture where appropriate.
+- Avoid duplicate implementations.
+- Avoid unnecessary dependencies.
+- Avoid hardcoded production URLs.
+- Avoid fake success states.
+- Avoid silent fallback behavior.
+- Handle asynchronous operations correctly.
+- Handle Firebase errors explicitly.
+- Keep TypeScript types accurate.
+- Remove obsolete or dangerous code.
+- Maintain existing project conventions.
+- Do not leave unfinished TODOs for critical integrity functionality.
+
+If a requirement cannot be safely implemented within the current architecture, explain the limitation and implement the safest compatible alternative.
+
+---
+
+# 17. FINAL ACCEPTANCE CRITERIA
+
+The project will be considered successful only when all of the following are true:
+
+1. Admin uploads the original APK.
+2. The original APK is stored in Firebase Storage.
+3. The uploaded Storage object is verified.
+4. SHA-256 is correctly recorded.
+5. Exact file size is correctly recorded.
+6. Only verified APK versions can be published.
+7. User downloads the correct published version.
+8. Downloaded APK SHA-256 matches the original.
+9. Downloaded APK file size matches the original.
+10. No fake or substitute APK can be delivered.
+11. GitHub Pages deployment architecture works correctly.
+12. Firebase security rules protect the upload and publishing process.
+13. Existing website features and design remain intact.
+
+NON-NEGOTIABLE CONDITION:
+
+SHA256(Admin Original APK) === SHA256(User Downloaded APK)
+
+Admin Original APK Size === User Downloaded APK Size
+
+If either condition fails, the download must be rejected.
+
+---
+
+# 18. FINAL IMPLEMENTATION REPORT
+
+After completing the work, provide a detailed report containing:
+
+1. Complete list of identified problems.
+2. Root cause of each problem.
+3. Complete list of modified files.
+4. Files added or removed.
+5. Explanation of the new APK upload workflow.
+6. Explanation of the new APK download workflow.
+7. SHA-256 verification implementation details.
+8. File size verification implementation details.
+9. Firebase Storage and Firestore changes.
+10. Firestore and Storage security rule changes.
+11. GitHub Pages compatibility changes.
+12. Tests executed.
+13. Actual test results: Passed, Failed, or Not Tested.
+14. Any remaining limitations or required manual configuration.
+
+Do not report tests as passed if they were not executed.
+
+Do not claim that GitHub deployment or production Firebase configuration has been completed unless it was actually done.
+
+## FINAL INSTRUCTION
+
+Start by inspecting the entire existing AppDrop source code.
+
+Then create a clear implementation plan internally, fix all confirmed problems, modify the necessary files, run the tests, and report the actual results.
+
+Do not stop after providing an analysis.
+
+Your final responsibility is to make the existing AppDrop website reliably deliver the exact original APK uploaded by the Admin, with SHA-256 and exact file-size verification proving its integrity.

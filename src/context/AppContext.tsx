@@ -938,11 +938,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const targetVer = versions.find((v) => v.id === versionId);
 
     if (!targetApp || !targetVer) {
-      throw new Error('Application or version not found.');
+      throw new Error('Application or version record not found.');
     }
 
     if (targetApp.status !== 'published' || targetVer.status !== 'published') {
       throw new Error('Cannot download unpublished or archived application version.');
+    }
+
+    if (!targetVer.sha256 || targetVer.sha256.length !== 64 || !targetVer.apkSizeBytes || targetVer.apkSizeBytes <= 0) {
+      throw new Error('Integrity metadata (SHA-256 or byte size) is missing or corrupted for this release.');
     }
 
     const reqId = generateRequestId();
@@ -991,23 +995,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('Non-blocking Firestore download event sync notice:', statErr);
     }
 
-    // Dynamically use the application's display name for the APK file name across all published apps
     const fileName = formatApkDownloadFileName(targetApp.name, targetVer.versionName);
-    const basePath =
-      typeof window !== 'undefined' && window.location.pathname.startsWith('/App-drop')
-        ? '/App-drop'
-        : '';
-    const encodedName = encodeURIComponent(fileName);
-    const directServerUrl =
-      targetVer.downloadUrl && targetVer.downloadUrl.startsWith('http')
-        ? targetVer.downloadUrl
-        : `${basePath}/api/apks/${versionId}/download?filename=${encodedName}`;
 
-    // Primary download uses directServerUrl to ensure Android system DownloadManager
-    // receives Content-Type: application/vnd.android.package-archive directly from the server stream
-    const downloadUrl = directServerUrl;
+    // Determine authoritative download URL
+    let authoritativeUrl = targetVer.downloadUrl || '';
 
-    return { downloadUrl, fileName, directServerUrl };
+    // If downloadUrl is relative or missing and we're in browser, attempt to resolve from Firebase Storage
+    if (!authoritativeUrl || !authoritativeUrl.startsWith('http')) {
+      try {
+        const { storage } = await import('../lib/firebase');
+        const { ref, getDownloadURL } = await import('firebase/storage');
+        if (storage && targetVer.apkPath) {
+          authoritativeUrl = await getDownloadURL(ref(storage, targetVer.apkPath));
+        }
+      } catch {}
+    }
+
+    // If still relative, use local dev route
+    if (!authoritativeUrl) {
+      const basePath =
+        typeof window !== 'undefined' && window.location.pathname.startsWith('/App-drop')
+          ? '/App-drop'
+          : '';
+      const encodedName = encodeURIComponent(fileName);
+      authoritativeUrl = `${basePath}/api/apks/${versionId}/download?filename=${encodedName}`;
+    }
+
+    return {
+      downloadUrl: authoritativeUrl,
+      fileName,
+      directServerUrl: authoritativeUrl,
+      sha256: targetVer.sha256,
+      apkSizeBytes: targetVer.apkSizeBytes,
+    };
   };
 
   const updateSystemConfig = async (updates: Partial<SystemConfig>) => {
@@ -1263,11 +1283,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         },
       });
 
+      if (!saveResult || (!saveResult.cloudResult && !saveResult.serverResult && typeof indexedDB === 'undefined')) {
+        throw new Error('Upload failed: Unable to store intact binary in storage. Publishing cancelled.');
+      }
+
       setUploadProgress((prev) => ({
         ...prev,
         stage: 'publishing',
         percentage: 95,
-        details: 'Package written intact to storage. Registering release in directory...',
+        details: 'Package written intact to storage. Verifying uploaded object and registering release...',
         etaFormatted: '< 1s',
       }));
 

@@ -35,17 +35,6 @@ const upload = multer({
   },
 });
 
-const TEMPLATE_APK_PATH = path.join(process.cwd(), 'public', 'assets', 'template.apk');
-
-function createServerFallbackApk(filePath: string) {
-  if (fs.existsSync(TEMPLATE_APK_PATH)) {
-    fs.copyFileSync(TEMPLATE_APK_PATH, filePath);
-    return;
-  }
-  throw new Error('Template APK not found');
-}
-
-
 // Reusable download handler supporting range requests and exact byte lengths
 const handleApkDownload = (req: express.Request, res: express.Response) => {
   const versionId = req.params.versionId;
@@ -56,16 +45,9 @@ const handleApkDownload = (req: express.Request, res: express.Response) => {
   const finalFileName = cleanFileName.endsWith('.apk') ? cleanFileName : `${cleanFileName}.apk`;
 
   if (!fs.existsSync(filePath)) {
-    // Only fall back to template.apk if the requested version is specifically the official calculator sample
-    if (fs.existsSync(TEMPLATE_APK_PATH) && (versionId.includes('calc') || versionId.includes('official'))) {
-      try {
-        createServerFallbackApk(filePath);
-      } catch {
-        return res.status(404).json({ error: 'APK binary not found on server disk.' });
-      }
-    } else {
-      return res.status(404).json({ error: 'APK binary not found on server disk. Please ensure the admin uploaded the release package.' });
-    }
+    return res.status(404).json({
+      error: 'APK binary not found on server disk. Exact original package must be uploaded by the administrator.',
+    });
   }
 
   const stat = fs.statSync(filePath);

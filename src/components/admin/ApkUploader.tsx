@@ -35,6 +35,7 @@ const DEFAULT_GRADIENT_ICON = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3
 export const ApkUploader: React.FC = () => {
   const {
     apps,
+    versions,
     selectedAppId,
     systemConfig,
     uploadProgress,
@@ -160,6 +161,7 @@ export const ApkUploader: React.FC = () => {
 
     try {
       setIsDownloadingTest(true);
+      setDownloadNotice('Initiating verified test download...');
       const appRecord = apps.find((a) => a.id === appId);
       const versionId = appRecord?.latestPublishedVersionId;
       if (!versionId) {
@@ -167,19 +169,32 @@ export const ApkUploader: React.FC = () => {
         return;
       }
 
-      const { downloadUrl, fileName } = await requestDownload(appId, versionId);
-      const res = await fetch(downloadUrl);
-      const blob = await res.blob();
+      const targetVer = versions.find((v) => v.id === versionId);
+      if (!targetVer) {
+        setDownloadNotice('Target version record not found in directory.');
+        return;
+      }
 
+      const { downloadAndVerifyApk } = await import('../../lib/binaryStorage');
+      const verifiedResult = await downloadAndVerifyApk(
+        { id: appRecord.id, name: appRecord.name },
+        targetVer,
+        (prog) => {
+          setDownloadNotice(prog.details || `Verifying release binary (${prog.percentage}%)...`);
+        }
+      );
+
+      const objectUrl = URL.createObjectURL(verifiedResult.blob);
       const anchor = document.createElement('a');
-      anchor.href = downloadUrl;
-      anchor.download = fileName;
+      anchor.href = objectUrl;
+      anchor.download = verifiedResult.fileName;
       document.body.appendChild(anchor);
       anchor.click();
       document.body.removeChild(anchor);
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 5000);
 
       setDownloadNotice(
-        `Downloaded "${fileName}" (${(blob.size / (1024 * 1024)).toFixed(2)} MB · ${blob.size.toLocaleString()} bytes) verified intact!`
+        `✓ Downloaded & Verified "${verifiedResult.fileName}" (${(verifiedResult.verifiedSize / (1024 * 1024)).toFixed(2)} MB · ${verifiedResult.verifiedSize.toLocaleString()} bytes). Cryptographic SHA-256 matches: ${verifiedResult.verifiedSha256.slice(0, 16)}...`
       );
     } catch (err: any) {
       setDownloadNotice(`Download test failed: ${err?.message || err}`);
