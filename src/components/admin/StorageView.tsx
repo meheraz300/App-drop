@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
+import { getApiBasePath } from '../../lib/binaryStorage';
 import {
   HardDrive,
   AlertTriangle,
@@ -35,7 +36,7 @@ export const StorageView: React.FC = () => {
   // Fetch live server disk storage statistics
   const fetchServerStats = async () => {
     try {
-      const res = await fetch('/api/apks/stats');
+      const res = await fetch(`${getApiBasePath()}/api/apks/stats`);
       if (res.ok) {
         const data = await res.json();
         setServerStats(data);

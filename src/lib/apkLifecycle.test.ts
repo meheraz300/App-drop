@@ -322,3 +322,19 @@ test('Scenario 23 & 24: Rollback policy allows valid previous version and reject
   const check2 = canRollbackToVersion(app, ver2);
   assert.equal(check2.allowed, false);
 });
+
+test('Scenario 25: Production seedData has zero hardcoded calculator or demo apps/versions', async () => {
+  const { INITIAL_APPS, INITIAL_VERSIONS } = await import('./seedData');
+  assert.equal(INITIAL_APPS.length, 0);
+  assert.equal(INITIAL_VERSIONS.length, 0);
+});
+
+test('Scenario 26: HTML/JSON response masquerading as .apk fails binary APK validation cleanly', async () => {
+  const htmlContent = new TextEncoder().encode('<!doctype html><html><title>404</title></html>');
+  const htmlBlob = new Blob([htmlContent], { type: 'text/html' });
+  assert.equal(await isBinaryApkValid(htmlBlob), false);
+
+  const check = await verifyApkBinary(htmlBlob, 'a'.repeat(64), htmlContent.length);
+  assert.equal(check.valid, false);
+});
+

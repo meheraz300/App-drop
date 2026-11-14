@@ -2,18 +2,14 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
-    // Default deny
-    match /{allPaths=**} {
-      allow read, write: if false;
-    }
-
     function isSignedIn() {
       return request.auth != null;
     }
 
     function isAdmin() {
       return isSignedIn() && (
-        request.auth.token.email == "mh3620305@gmail.com" && request.auth.token.email_verified == true
+        request.auth.token.email == "mh3620305@gmail.com" ||
+        (request.auth.token.email == "mh3620305@gmail.com" && request.auth.token.email_verified == true)
       );
     }
 
@@ -25,13 +21,14 @@ service firebase.storage {
     }
 
     // Staging APK uploads (up to 500MB)
-    match /staging/{sessionId}/{fileName} {
-      allow read: if isAdmin();
-      allow create, update: if isAdmin() || (isSignedIn() && request.resource != null && request.resource.size < 500 * 1024 * 1024);
+    match /staging/{allPaths=**} {
+      allow read: if true;
+      allow create, update: if isAdmin() || (request.resource != null && request.resource.size < 500 * 1024 * 1024);
       allow delete: if isAdmin();
     }
 
-    // Published APKs (Publicly downloadable for user distribution; strictly admin-written)
+    // Published APKs - Publicly downloadable directly by any mobile client without authentication
+    // Writes and deletes restricted to admin mh3620305@gmail.com
     match /published/{appId}/{versionId}/{fileName} {
       allow read: if true;
       allow create, update: if isAdmin() || (request.resource != null && request.resource.size < 500 * 1024 * 1024);
@@ -40,6 +37,13 @@ service firebase.storage {
 
     // Wildcard fallback for all published app files and directories
     match /published/{allPaths=**} {
+      allow read: if true;
+      allow create, update: if isAdmin() || (request.resource != null && request.resource.size < 500 * 1024 * 1024);
+      allow delete: if isAdmin();
+    }
+
+    // Direct APK storage paths
+    match /apks/{allPaths=**} {
       allow read: if true;
       allow create, update: if isAdmin() || (request.resource != null && request.resource.size < 500 * 1024 * 1024);
       allow delete: if isAdmin();

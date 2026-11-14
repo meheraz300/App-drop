@@ -41,7 +41,7 @@ import {
   where,
 } from 'firebase/firestore';
 import {
-  inspectApkBinary,
+  inspectApkFile,
   validateApkAgainstApp,
 } from '../lib/apkValidator';
 import {
@@ -51,8 +51,10 @@ import {
 } from '../lib/versionPolicy';
 import {
   saveApkBinary,
-  getApkBinary,
   deleteApkBinary,
+  purgeAllStoredFiles,
+  getApiBasePath,
+  isCloudStorageBucketAvailable,
 } from '../lib/binaryStorage';
 import {
   recordDownloadEvent,
@@ -111,7 +113,14 @@ interface AppContextType {
   deleteApp: (appId: string) => Promise<void>;
   rollbackVersion: (appId: string, targetVersionId: string) => Promise<{ success: boolean; error?: string }>;
   updateReleaseNotes: (versionId: string, releaseNotes: string) => Promise<void>;
-  requestDownload: (appId: string, versionId: string) => Promise<{ downloadUrl: string; fileName: string; blobUrl?: string; directServerUrl?: string }>;
+  requestDownload: (appId: string, versionId: string) => Promise<{
+    downloadUrl: string;
+    fileName: string;
+    blobUrl?: string;
+    directServerUrl?: string;
+    sha256: string;
+    apkSizeBytes: number;
+  }>;
   updateSystemConfig: (updates: Partial<SystemConfig>) => Promise<void>;
   purgeAllStorage: () => Promise<{ cloudDeleted: number; serverDeleted: number; serverFreedBytes: number }>;
   triggerManualDeploy: () => Promise<{ message: string }>;
@@ -160,6 +169,40 @@ const STORAGE_KEYS = {
   CONFIG: 'appdrop_config_cache',
 };
 
+const isLegacyDemoApp = (a: Partial<AppRecord> | null | undefined): boolean => {
+  if (!a) return false;
+  const id = a.id || '';
+  const pkg = a.packageName || '';
+  return (
+    id === 'app_calculator_official' ||
+    id === 'app_1793716730739_iuf0' ||
+    id.includes('quantum') ||
+    id.includes('liquid') ||
+    id.includes('signal') ||
+    id.includes('aether') ||
+    pkg.includes('quantumguard') ||
+    pkg.includes('liquidflow')
+  );
+};
+
+const isLegacyDemoVersion = (v: Partial<VersionRecord> | null | undefined): boolean => {
+  if (!v) return false;
+  const id = v.id || '';
+  const appId = v.appId || '';
+  return (
+    id === 'ver_calculator_5_12_0' ||
+    id === 'ver_app_1793716730739_iuf0_1793716730739' ||
+    appId === 'app_calculator_official' ||
+    appId === 'app_1793716730739_iuf0' ||
+    id.includes('quantum') ||
+    id.includes('liquid') ||
+    id.includes('signal') ||
+    id.includes('aether') ||
+    appId.includes('quantum') ||
+    appId.includes('liquid')
+  );
+};
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Theme state
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -181,16 +224,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          // Filter out demo data
-          const cleaned = parsed.filter(
-            (a) =>
-              !a.id?.includes('quantum') &&
-              !a.id?.includes('liquid') &&
-              !a.id?.includes('signal') &&
-              !a.id?.includes('aether') &&
-              !a.packageName?.includes('quantumguard') &&
-              !a.packageName?.includes('liquidflow')
-          );
+          const cleaned = parsed.filter((a) => !isLegacyDemoApp(a));
           if (cleaned.length > 0) return cleaned;
         }
       } catch {
@@ -207,16 +241,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          // Filter out demo versions
-          const cleaned = parsed.filter(
-            (v) =>
-              !v.id?.includes('quantum') &&
-              !v.id?.includes('liquid') &&
-              !v.id?.includes('signal') &&
-              !v.id?.includes('aether') &&
-              !v.appId?.includes('quantum') &&
-              !v.appId?.includes('liquid')
-          );
+          const cleaned = parsed.filter((v) => !isLegacyDemoVersion(v));
           if (cleaned.length > 0) return cleaned;
         }
       } catch {
@@ -453,15 +478,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (!db) return;
 
-    // For public visitors: query public, published applications in real-time
-    // For admin: query all applications so admin dashboard sees drafts/archived too
+    // For public visitors: single-field query avoids missing Firestore composite index;
+    // visibility is filtered client-side. For admin: query all applications.
     const appsQuery = user?.isAdmin
       ? collection(db, 'apps')
-      : query(
-          collection(db, 'apps'),
-          where('visibility', '==', 'public'),
-          where('status', '==', 'published')
-        );
+      : query(collection(db, 'apps'), where('status', '==', 'published'));
 
     const unsubscribeApps = onSnapshot(
       appsQuery,
@@ -469,21 +490,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const remoteApps: AppRecord[] = [];
         snapshot.forEach((docSnap) => {
           const data = docSnap.data() as AppRecord;
-          if (data && data.id) {
+          if (data && data.id && (user?.isAdmin || data.visibility === 'public')) {
             remoteApps.push(data);
           }
         });
 
-        // Clean out demo records if any exist in remote store
-        const cleanedRemoteApps = remoteApps.filter(
-          (a) =>
-            !a.id?.includes('quantum') &&
-            !a.id?.includes('liquid') &&
-            !a.id?.includes('signal') &&
-            !a.id?.includes('aether') &&
-            !a.packageName?.includes('quantumguard') &&
-            !a.packageName?.includes('liquidflow')
-        );
+        // Clean out legacy demo records if any exist in remote store
+        const cleanedRemoteApps = remoteApps.filter((a) => !isLegacyDemoApp(a));
 
         // Sort: featured first, then newest updated/created
         cleanedRemoteApps.sort((a, b) => {
@@ -538,15 +551,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         });
 
-        const cleanedRemoteVersions = remoteVersions.filter(
-          (v) =>
-            !v.id?.includes('quantum') &&
-            !v.id?.includes('liquid') &&
-            !v.id?.includes('signal') &&
-            !v.id?.includes('aether') &&
-            !v.appId?.includes('quantum') &&
-            !v.appId?.includes('liquid')
-        );
+        const cleanedRemoteVersions = remoteVersions.filter((v) => !isLegacyDemoVersion(v));
 
         setVersions((prevLocal) => {
           const now = Date.now();
@@ -649,7 +654,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch (err: any) {
       console.warn('Google popup sign-in note:', err);
       // If popup fails (e.g. in hermetic iframe environment), offer quick simulation
-      simulateAdminSignIn();
+      simulateAdminSignIn(ADMIN_CONFIGURED_EMAIL);
     }
   };
 
@@ -839,10 +844,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const impact = calculateDeletionImpact(targetApp, versions);
 
-    // Clean up stored binaries from IndexedDB
+    // Clean up stored binaries from Cloud Storage, server disk, and local caches
     const appVers = versions.filter((v) => v.appId === appId);
     for (const v of appVers) {
-      await deleteApkBinary(v.id);
+      await deleteApkBinary(v.id, {
+        appId,
+        fileName: formatApkDownloadFileName(targetApp.name, v.versionName),
+        apkPath: v.apkPath,
+      });
     }
 
     // Remove app and its versions from local state
@@ -961,62 +970,79 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDownloadStats(updatedStats);
     setDownloadEvents(updatedEvents);
 
-    // Sync download event & download count to Firestore
-    try {
-      const eventDoc = {
-        id: reqId,
-        appId,
-        versionId,
-        eventType: 'download_url_issued',
-        createdAt: new Date().toISOString(),
-        requestId: reqId,
-      };
-      await setDoc(doc(db, 'downloadEvents', reqId), eventDoc);
-
-      const today = new Date().toISOString().split('T')[0];
-      const statId = `${today}_${appId}_${versionId}`.replace(/[/\\?%*:|"<>]/g, '_');
-      const curStat = updatedStats.find((s) => s.appId === appId && s.versionId === versionId && s.date === today);
-      const totalCount = curStat ? (curStat.requestCount || (curStat as any).downloads || 1) : 1;
-      await setDoc(
-        doc(db, 'downloadStats', statId),
-        {
-          id: statId,
+    // Sync download event & download count to Firestore in background without delaying the download stream
+    void (async () => {
+      try {
+        const eventDoc = {
+          id: reqId,
           appId,
           versionId,
-          date: today,
-          requestCount: totalCount,
-          downloads: totalCount,
-          updatedAt: new Date().toISOString(),
-          lastDownloadedAt: new Date().toISOString(),
-        },
-        { merge: true }
-      );
-    } catch (statErr) {
-      console.warn('Non-blocking Firestore download event sync notice:', statErr);
-    }
+          eventType: 'download_url_issued',
+          createdAt: new Date().toISOString(),
+          requestId: reqId,
+        };
+        await setDoc(doc(db, 'downloadEvents', reqId), eventDoc);
+
+        const today = new Date().toISOString().split('T')[0];
+        const statId = `${today}_${appId}_${versionId}`.replace(/[/\\?%*:|"<>]/g, '_');
+        const curStat = updatedStats.find((s) => s.appId === appId && s.versionId === versionId && s.date === today);
+        const totalCount = curStat ? (curStat.requestCount || (curStat as any).downloads || 1) : 1;
+        await setDoc(
+          doc(db, 'downloadStats', statId),
+          {
+            id: statId,
+            appId,
+            versionId,
+            date: today,
+            requestCount: totalCount,
+            downloads: totalCount,
+            updatedAt: new Date().toISOString(),
+            lastDownloadedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        );
+      } catch (statErr) {
+        console.warn('Non-blocking Firestore download event sync notice:', statErr);
+      }
+    })();
 
     const fileName = formatApkDownloadFileName(targetApp.name, targetVer.versionName);
 
     // Determine authoritative download URL
     let authoritativeUrl = targetVer.downloadUrl || '';
+    const basePath = getApiBasePath();
 
-    // If downloadUrl is relative or missing and we're in browser, attempt to resolve from Firebase Storage
-    if (!authoritativeUrl || !authoritativeUrl.startsWith('http')) {
+    // Normalize relative /api/apks/* URLs immediately without hitting Cloud Storage
+    if (authoritativeUrl.startsWith('/api/apks/') && basePath) {
+      authoritativeUrl = `${basePath}${authoritativeUrl}`;
+    }
+
+    // Only attempt Firebase Storage getDownloadURL when no local/direct URL exists AND bucket is actually provisioned
+    if (!authoritativeUrl) {
       try {
-        const { storage } = await import('../lib/firebase');
-        const { ref, getDownloadURL } = await import('firebase/storage');
-        if (storage && targetVer.apkPath) {
-          authoritativeUrl = await getDownloadURL(ref(storage, targetVer.apkPath));
+        const { storage, app: fbApp } = await import('../lib/firebase');
+        if (storage && (await isCloudStorageBucketAvailable(fbApp?.options?.storageBucket))) {
+          const { ref, getDownloadURL } = await import('firebase/storage');
+          const candidatePaths = [
+            targetVer.apkPath,
+            `published/${targetApp.id}/${targetVer.id}/${fileName}`,
+            `published/${targetApp.id}/${targetVer.id}/${fileName.endsWith('.apk') ? fileName : fileName + '.apk'}`,
+            `published/${targetApp.id}/${targetVer.id}.apk`,
+            `published/${targetVer.id}.apk`,
+          ].filter(Boolean) as string[];
+
+          for (const cPath of candidatePaths) {
+            try {
+              authoritativeUrl = await getDownloadURL(ref(storage, cPath));
+              if (authoritativeUrl) break;
+            } catch {}
+          }
         }
       } catch {}
     }
 
-    // If still relative, use local dev route
+    // Default to verified backend endpoint if still missing
     if (!authoritativeUrl) {
-      const basePath =
-        typeof window !== 'undefined' && window.location.pathname.startsWith('/App-drop')
-          ? '/App-drop'
-          : '';
       const encodedName = encodeURIComponent(fileName);
       authoritativeUrl = `${basePath}/api/apks/${versionId}/download?filename=${encodedName}`;
     }
@@ -1050,18 +1076,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const purgeAllStorage = async () => {
-    let serverDeleted = 0;
-    let serverFreedBytes = 0;
-    let cloudDeleted = 0;
-    try {
-      const res = await fetch('/api/apks/purge', { method: 'POST' });
-      if (res.ok) {
-        const data = await res.json();
-        serverDeleted = data.deletedCount || 0;
-        serverFreedBytes = data.freedBytes || 0;
-      }
-    } catch {}
-    return { cloudDeleted, serverDeleted, serverFreedBytes };
+    return await purgeAllStoredFiles();
   };
 
   const triggerManualDeploy = async () => {
@@ -1151,8 +1166,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         details: `Reading & verifying ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)...`,
       });
 
-      const buffer = await file.arrayBuffer();
-      const metadata = await inspectApkBinary(buffer, file.name);
+      const metadata = await inspectApkFile(file, file.name, undefined, (hashPct) => {
+        setUploadProgress((prev) => ({
+          ...prev,
+          stage: 'validating',
+          percentage: Math.min(24, 15 + Math.round((hashPct / 100) * 9)),
+          details: `Inspecting & hashing ${file.name} (${hashPct}%)...`,
+        }));
+      });
 
       setUploadProgress({
         stage: 'validating',
@@ -1160,7 +1181,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         details: `Verified ${metadata.packageName} (v${metadata.versionName}). Staging binary transfer...`,
       });
 
-      // Find target app if specified, or find by extracted package name, or auto-create!
+      // Find target app if specified, or find by extracted package name, or prepare auto-creation (committed ONLY after verified upload)
       let targetApp = specifiedAppId ? apps.find((a) => a.id === specifiedAppId) : null;
       if (!targetApp) {
         targetApp = apps.find(
@@ -1170,9 +1191,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const now = new Date().toISOString();
       let targetAppId: string;
+      let wasAutoCreated = false;
 
-      // If app does not exist, directly auto-create the application!
       if (!targetApp) {
+        wasAutoCreated = true;
         targetAppId = `app_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
         const autoName =
           appMeta?.name?.trim() || formatAppNameFromPackage(metadata.packageName, file.name);
@@ -1181,7 +1203,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           appMeta?.iconPath ||
           `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="%233b82f6"/><stop offset="100%" stop-color="%231d4ed8"/></linearGradient></defs><rect width="100" height="100" rx="22" fill="url(%23g)"/><path d="M50 20 C65 20 75 35 75 55 L70 65 L50 55 L30 65 L25 55 C25 35 35 20 50 20 Z" fill="white"/><circle cx="50" cy="40" r="7" fill="%231d4ed8"/></svg>`;
 
-        const newAppRecord: AppRecord = {
+        targetApp = {
           id: targetAppId,
           name: autoName.slice(0, 100),
           packageName: metadata.packageName.slice(0, 150),
@@ -1206,15 +1228,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           updatedAt: now,
           archivedAt: null,
         };
-
-        targetApp = newAppRecord;
-        setApps((prev) => [newAppRecord, ...prev]);
-        appendAuditLog(
-          'app.created',
-          targetAppId,
-          null,
-          `Direct APK upload auto-created application profile for "${newAppRecord.name}" (${newAppRecord.packageName}).`
-        );
       } else {
         targetAppId = targetApp.id;
         // If specified app was chosen, verify package name matches
@@ -1264,7 +1277,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const newVersionId = `ver_${targetAppId}_${Date.now()}`;
 
-      // Persist the exact original binary blob in server storage and multi-tier caches
+      // Persist the exact original binary blob in remote storage (Cloud Storage / server storage) and verify byte/SHA match
       const saveResult = await saveApkBinary(newVersionId, file, {
         appId: targetAppId,
         fileName: file.name,
@@ -1283,8 +1296,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         },
       });
 
-      if (!saveResult || (!saveResult.cloudResult && !saveResult.serverResult && typeof indexedDB === 'undefined')) {
-        throw new Error('Upload failed: Unable to store intact binary in storage. Publishing cancelled.');
+      if (!saveResult || (!saveResult.cloudResult && !saveResult.serverResult)) {
+        throw new Error('Upload failed: Unable to verify intact binary in remote storage. Publishing cancelled.');
       }
 
       setUploadProgress((prev) => ({
@@ -1295,13 +1308,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         etaFormatted: '< 1s',
       }));
 
+      const basePath = getApiBasePath();
       const effectiveDownloadUrl =
-        saveResult?.cloudResult?.downloadUrl ||
+        saveResult.cloudResult?.downloadUrl ||
         appMeta?.externalDownloadUrl?.trim() ||
-        `/api/apks/${newVersionId}/download`;
+        saveResult.serverResult?.downloadUrl ||
+        `${basePath}/api/apks/${newVersionId}/download`;
 
       const effectiveApkPath =
-        saveResult?.cloudResult?.storagePath ||
+        saveResult.cloudResult?.storagePath ||
+        saveResult.effectiveStoragePath ||
         `published/${targetAppId}/${newVersionId}/${file.name}`;
 
       const newVersion: VersionRecord = {
@@ -1324,24 +1340,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         downloadUrl: effectiveDownloadUrl,
       };
 
-      // Demote previous versions' isLatest flag
-      setVersions((prev) => [
-        newVersion,
-        ...prev.map((v) => (v.appId === targetAppId ? { ...v, isLatest: false } : v)),
-      ]);
-
-      // Update app latest published pointer
       const updatedAppRecord: AppRecord = {
         ...targetApp,
         latestPublishedVersionId: newVersionId,
         updatedAt: now,
       };
 
-      setApps((prev) =>
-        prev.map((a) => (a.id === targetAppId ? updatedAppRecord : a))
-      );
-
-      // Real-time synchronization to Firestore
+      // Real-time synchronization to Firestore BEFORE committing local pointer
       try {
         await setDoc(doc(db, 'apps', targetAppId), updatedAppRecord);
         await setDoc(doc(db, 'versions', newVersionId), newVersion);
@@ -1355,8 +1360,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           await updateDoc(doc(db, 'versions', pv.id), { isLatest: false }).catch(() => {});
           await updateDoc(doc(db, 'apps', targetAppId, 'versions', pv.id), { isLatest: false }).catch(() => {});
         }
-      } catch (fireErr) {
-        console.warn('Firestore real-time sync startApkUpload note:', fireErr);
+      } catch (fireErr: any) {
+        // Roll back uploaded binary if Firestore rejects publication
+        await deleteApkBinary(newVersionId, {
+          appId: targetAppId,
+          fileName: file.name,
+          apkPath: effectiveApkPath,
+        }).catch(() => {});
+        throw new Error(
+          `Publishing aborted: Firestore synchronization failed (${fireErr?.message || 'permission or quota error'}). Previous release remains untouched.`
+        );
+      }
+
+      // Commit version & app state ONLY after verified upload + Firestore publication succeed
+      setVersions((prev) => [
+        newVersion,
+        ...prev.map((v) => (v.appId === targetAppId ? { ...v, isLatest: false } : v)),
+      ]);
+
+      setApps((prev) =>
+        wasAutoCreated
+          ? [updatedAppRecord, ...prev]
+          : prev.map((a) => (a.id === targetAppId ? updatedAppRecord : a))
+      );
+
+      if (wasAutoCreated) {
+        appendAuditLog(
+          'app.created',
+          targetAppId,
+          null,
+          `Direct APK upload auto-created application profile for "${updatedAppRecord.name}" (${updatedAppRecord.packageName}).`
+        );
       }
 
       // Cross-tab real-time broadcast

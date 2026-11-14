@@ -16,7 +16,7 @@ import {
   Clock,
 } from 'lucide-react';
 import { GlassSurface, GlassButton, GlassTag } from '../common/GlassComponents';
-import { formatApkDownloadFileName, estimateDownloadDuration } from '../../lib/downloadHelper';
+import { estimateDownloadDuration } from '../../lib/downloadHelper';
 import { MobileInstallAssistantModal } from './MobileInstallAssistantModal';
 import { type InstallIssueType } from '../../lib/mobileInstallHelper';
 
@@ -33,8 +33,11 @@ export const AppDetailsView: React.FC = () => {
   const [initialModalIssue, setInitialModalIssue] = useState<InstallIssueType | undefined>(undefined);
   const [lastDownloadInfo, setLastDownloadInfo] = useState<{
     fileName: string;
-    directServerUrl?: string;
+    verifiedSha256?: string;
+    verifiedSize?: number;
   } | null>(null);
+  const [downloadStage, setDownloadStage] = useState<'idle' | 'downloading' | 'verifying' | 'completed'>('idle');
+  const [downloadStatusText, setDownloadStatusText] = useState<string>('');
 
   const app = apps.find((a) => a.id === selectedAppId);
 
@@ -78,50 +81,45 @@ export const AppDetailsView: React.FC = () => {
 
   const latestVersion = appVersions.find((v) => v.id === app.latestPublishedVersionId) || appVersions[0];
 
-  const [downloadStage, setDownloadStage] = useState<'idle' | 'downloading' | 'verifying' | 'completed'>('idle');
-  const [downloadStatusText, setDownloadStatusText] = useState<string>('');
-
   const executeDownload = async (versionId: string) => {
     try {
       setDownloadError(null);
       setDownloadingVersionId(versionId);
-      setDownloadProgress(5);
+      setDownloadProgress(10);
       setDownloadStage('downloading');
-      setDownloadStatusText('Connecting to release package...');
+      setDownloadStatusText('Preparing stream...');
 
       const targetVer = appVersions.find((v) => v.id === versionId);
       if (!targetVer) {
         throw new Error('Target version record not found.');
       }
 
-      // Execute verified download workflow:
-      // 1. Retrieves authentic binary
-      // 2. Incremental SHA-256 & byte size calculation
-      // 3. Mathematical check: SHA256(Admin) === SHA256(User) && Size(Admin) === Size(User)
-      // 4. Rejects with error if mismatch
+      // Record download request and resolve authoritative download URL
+      const dlResult = await requestDownload(app.id, versionId);
+
+      // Strictly stream, verify exact byte size + SHA-256 against admin original, and save clean Blob
       const { downloadAndVerifyApk } = await import('../../lib/binaryStorage');
       const verifiedResult = await downloadAndVerifyApk(
         { id: app.id, name: app.name },
-        targetVer,
+        {
+          ...targetVer,
+          downloadUrl: dlResult.downloadUrl || targetVer.downloadUrl,
+        },
         (prog) => {
           setDownloadProgress(prog.percentage);
           if (prog.stage === 'verifying') {
             setDownloadStage('verifying');
-            setDownloadStatusText('Verifying cryptographic SHA-256 & byte size...');
+            setDownloadStatusText('Verifying SHA-256...');
           } else if (prog.stage === 'downloading') {
             setDownloadStage('downloading');
-            setDownloadStatusText(prog.details || `Downloading package (${prog.percentage}%)...`);
+            setDownloadStatusText(`Downloading (${prog.percentage}%)...`);
           } else if (prog.stage === 'completed') {
             setDownloadStage('completed');
-            setDownloadStatusText('Integrity 100% verified. Triggering save...');
+            setDownloadStatusText('Verified & Ready!');
           }
         }
       );
 
-      // Record download event in stats (fire-and-forget)
-      await requestDownload(app.id, versionId).catch(() => {});
-
-      // Trigger browser save from verified Blob URL
       const objectUrl = URL.createObjectURL(verifiedResult.blob);
       const anchor = document.createElement('a');
       anchor.href = objectUrl;
@@ -132,20 +130,25 @@ export const AppDetailsView: React.FC = () => {
 
       setLastDownloadInfo({
         fileName: verifiedResult.fileName,
-        directServerUrl: undefined,
+        verifiedSha256: verifiedResult.verifiedSha256,
+        verifiedSize: verifiedResult.verifiedSize,
       });
 
       setShowPostDownloadCard(true);
 
+      // Keep object URL alive for 60s so mobile browser completes saving exact binary,
+      // while resetting button interactive state cleanly after 1.8s
       setTimeout(() => {
         URL.revokeObjectURL(objectUrl);
+      }, 60000);
+      setTimeout(() => {
         setDownloadingVersionId(null);
         setDownloadProgress(0);
         setDownloadStage('idle');
         setDownloadStatusText('');
-      }, 1200);
+      }, 1800);
     } catch (err: any) {
-      setDownloadError(err.message || 'Download verification failed. Aborted for security.');
+      setDownloadError(err.message || 'Download failed. Please retry.');
       setDownloadingVersionId(null);
       setDownloadProgress(0);
       setDownloadStage('idle');
@@ -264,16 +267,17 @@ export const AppDetailsView: React.FC = () => {
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-[11px] text-[var(--lg-ink-muted)]">
                 Downloaded: <b>{lastDownloadInfo?.fileName}</b>
+                {lastDownloadInfo?.verifiedSha256 ? ` · SHA-256 ${lastDownloadInfo.verifiedSha256.slice(0, 12)}...` : ''}
               </span>
-              {lastDownloadInfo?.directServerUrl && (
-                <a
-                  href={lastDownloadInfo.directServerUrl}
-                  download={lastDownloadInfo.fileName}
-                  className="text-[11px] font-semibold text-[var(--lg-accent-start)] hover:underline inline-flex items-center gap-1 bg-white/50 dark:bg-white/10 px-2 py-0.5 rounded-lg border border-white/20"
+              {latestVersion && (
+                <button
+                  type="button"
+                  onClick={() => handleDownload(latestVersion.id)}
+                  className="text-[11px] font-semibold text-[var(--lg-accent-start)] hover:underline inline-flex items-center gap-1 bg-white/50 dark:bg-white/10 px-2 py-0.5 rounded-lg border border-white/20 cursor-pointer"
                 >
                   <Download className="h-3 w-3" />
-                  <span>Direct HTTP Link</span>
-                </a>
+                  <span>Download Again (Verified)</span>
+                </button>
               )}
             </div>
             <button
@@ -374,7 +378,7 @@ export const AppDetailsView: React.FC = () => {
                           ? 'Verifying SHA-256...'
                           : downloadProgress >= 100
                           ? 'Verified & Ready!'
-                          : 'Downloading APK...'}
+                          : downloadStatusText || 'Downloading APK...'}
                       </span>
                     </div>
 

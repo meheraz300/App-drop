@@ -312,6 +312,171 @@ export function isZipArchive(buffer: ArrayBuffer): boolean {
   return magic === 0x04034b50;
 }
 
+async function inflateManifestBytes(raw: Uint8Array, method: number): Promise<Uint8Array | null> {
+  if (method === 0) return raw;
+  if (method !== 8) return null;
+
+  if (typeof DecompressionStream !== 'undefined') {
+    const ds = new DecompressionStream('deflate-raw');
+    const writer = ds.writable.getWriter();
+    writer.write(raw as unknown as BufferSource);
+    writer.close();
+    const decomp = await new Response(ds.readable).arrayBuffer();
+    return new Uint8Array(decomp);
+  }
+
+  try {
+    const mod = 'node:zlib';
+    const nodeZlib = await import(/* @vite-ignore */ mod);
+    return new Uint8Array(nodeZlib.inflateRawSync(Buffer.from(raw)));
+  } catch {
+    return null;
+  }
+}
+
+function decodeBinaryManifestAxml(manifestBytes: Uint8Array | null): {
+  packageName?: string;
+  versionName?: string;
+  versionCode?: number;
+  appLabel?: string;
+} | null {
+  if (!manifestBytes || manifestBytes.byteLength < 32) return null;
+  const axmlView = new DataView(manifestBytes.buffer, manifestBytes.byteOffset, manifestBytes.byteLength);
+
+  // Verify RES_XML_TYPE (0x0003)
+  if (axmlView.getUint16(0, true) !== 0x0003) return null;
+
+  // String pool header (0x0001)
+  const spOffset = 8;
+  if (axmlView.getUint16(spOffset, true) !== 0x0001) return null;
+  const stringCount = axmlView.getUint32(spOffset + 8, true);
+  const flags = axmlView.getUint32(spOffset + 16, true);
+  const isUtf8 = (flags & (1 << 8)) !== 0;
+  const stringsStart = spOffset + axmlView.getUint32(spOffset + 20, true);
+
+  const strings: string[] = [];
+  for (let i = 0; i < stringCount; i++) {
+    const strOffset = axmlView.getUint32(spOffset + 28 + i * 4, true);
+    const strPos = stringsStart + strOffset;
+    if (strPos >= manifestBytes.length) {
+      strings.push('');
+      continue;
+    }
+
+    if (isUtf8) {
+      let u8Pos = strPos;
+      if (manifestBytes[u8Pos] & 0x80) u8Pos += 2; else u8Pos += 1;
+      let u8Len = manifestBytes[u8Pos];
+      if (u8Len & 0x80) {
+        u8Len = ((u8Len & 0x7f) << 8) | manifestBytes[u8Pos + 1];
+        u8Pos += 2;
+      } else {
+        u8Pos += 1;
+      }
+      strings.push(new TextDecoder('utf-8').decode(manifestBytes.subarray(u8Pos, u8Pos + u8Len)));
+    } else {
+      const u16Len = axmlView.getUint16(strPos, true);
+      const sub = manifestBytes.subarray(strPos + 2, strPos + 2 + u16Len * 2);
+      strings.push(new TextDecoder('utf-16le').decode(sub));
+    }
+  }
+
+  // Skip string pool
+  let pos = 8 + axmlView.getUint32(spOffset + 4, true);
+
+  // Skip resource map (0x0180) if present
+  if (pos < manifestBytes.length && axmlView.getUint16(pos, true) === 0x0180) {
+    pos += axmlView.getUint32(pos + 4, true);
+  }
+
+  // Skip namespaces (0x0100)
+  while (pos < manifestBytes.length && axmlView.getUint16(pos, true) === 0x0100) {
+    pos += axmlView.getUint32(pos + 4, true);
+  }
+
+  let packageName = '';
+  let versionName = '';
+  let versionCode = 1;
+  let appLabel = '';
+
+  // Manifest Start Element (0x0102)
+  if (pos < manifestBytes.length && axmlView.getUint16(pos, true) === 0x0102) {
+    const attrCount = axmlView.getUint16(pos + 28, true);
+    for (let a = 0; a < attrCount; a++) {
+      const aOff = pos + 36 + a * 20;
+      const nameIdx = axmlView.getUint32(aOff + 4, true);
+      const valIdx = axmlView.getUint32(aOff + 8, true);
+      const rawData = axmlView.getUint32(aOff + 16, true);
+      const attrName = strings[nameIdx];
+
+      if (attrName === 'package') {
+        packageName = strings[valIdx] || '';
+      } else if (attrName === 'versionName') {
+        versionName = strings[valIdx] || '';
+      } else if (attrName === 'versionCode') {
+        versionCode = rawData || (strings[valIdx] ? parseInt(strings[valIdx], 10) : 1);
+      }
+    }
+  }
+
+  return {
+    packageName: packageName || undefined,
+    versionName: versionName || undefined,
+    versionCode: versionCode || undefined,
+    appLabel: appLabel || undefined,
+  };
+}
+
+/**
+ * Locates AndroidManifest.xml entry via ZIP End-of-Central-Directory & Central Directory records.
+ * Handles ZIP entries using bit-3 Data Descriptors (where Local File Header compSize is 0).
+ */
+function findManifestFromCentralDirectory(
+  tailBytes: Uint8Array,
+  tailStartOffset: number
+): { method: number; compSize: number; localHeaderOffset: number; cdOffset: number; cdSize: number } | null {
+  if (tailBytes.byteLength < 22) return null;
+  const view = new DataView(tailBytes.buffer, tailBytes.byteOffset, tailBytes.byteLength);
+
+  // Locate End of Central Directory signature 0x06054b50 from tail
+  let eocdOffset = -1;
+  for (let i = tailBytes.byteLength - 22; i >= 0; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) return null;
+
+  const cdSize = view.getUint32(eocdOffset + 12, true);
+  const cdOffset = view.getUint32(eocdOffset + 16, true);
+  const cdLocalStart = cdOffset - tailStartOffset;
+
+  // If Central Directory is wholly contained in tailBytes, parse directly
+  if (cdLocalStart >= 0 && cdLocalStart + cdSize <= tailBytes.byteLength) {
+    let pos = cdLocalStart;
+    const end = cdLocalStart + cdSize;
+    while (pos + 46 <= end) {
+      if (view.getUint32(pos, true) !== 0x02014b50) break;
+      const method = view.getUint16(pos + 10, true);
+      const compSize = view.getUint32(pos + 20, true);
+      const nameLen = view.getUint16(pos + 28, true);
+      const extraLen = view.getUint16(pos + 30, true);
+      const commentLen = view.getUint16(pos + 32, true);
+      const localHeaderOffset = view.getUint32(pos + 42, true);
+      const nameBytes = tailBytes.subarray(pos + 46, pos + 46 + nameLen);
+      const name = new TextDecoder('utf-8').decode(nameBytes);
+
+      if (name === 'AndroidManifest.xml') {
+        return { method, compSize, localHeaderOffset, cdOffset, cdSize };
+      }
+      pos += 46 + nameLen + extraLen + commentLen;
+    }
+  }
+
+  return { method: 0, compSize: 0, localHeaderOffset: -1, cdOffset, cdSize };
+}
+
 /**
  * Extracts binary AndroidManifest.xml from an APK (ZIP archive) and decodes package identity,
  * version name, version code, and application label.
@@ -325,133 +490,49 @@ export async function extractManifestMetadataFromApk(buffer: ArrayBuffer): Promi
 } | null> {
   try {
     const view = new DataView(buffer);
-    let offset = 0;
     let manifestBytes: Uint8Array | null = null;
 
-    // Scan ZIP local file headers for AndroidManifest.xml
-    while (offset < buffer.byteLength - 30) {
-      if (view.getUint32(offset, true) === 0x04034b50) {
+    // 1. Prefer Central Directory lookup (works reliably even with ZIP bit-3 data descriptors)
+    const fullBytes = new Uint8Array(buffer);
+    const cdInfo = findManifestFromCentralDirectory(fullBytes, 0);
+    if (cdInfo && cdInfo.localHeaderOffset >= 0 && cdInfo.compSize > 0) {
+      const lh = cdInfo.localHeaderOffset;
+      if (lh + 30 <= buffer.byteLength && view.getUint32(lh, true) === 0x04034b50) {
+        const nameLen = view.getUint16(lh + 26, true);
+        const extraLen = view.getUint16(lh + 28, true);
+        const dataOffset = lh + 30 + nameLen + extraLen;
+        if (dataOffset + cdInfo.compSize <= buffer.byteLength) {
+          const raw = new Uint8Array(buffer, dataOffset, cdInfo.compSize);
+          manifestBytes = await inflateManifestBytes(raw, cdInfo.method);
+        }
+      }
+    }
+
+    // 2. Fallback: walk ZIP local file headers sequentially (stops cleanly if compSize === 0)
+    if (!manifestBytes) {
+      let offset = 0;
+      while (offset + 30 <= buffer.byteLength) {
+        if (view.getUint32(offset, true) !== 0x04034b50) break;
         const method = view.getUint16(offset + 8, true);
         const compSize = view.getUint32(offset + 18, true);
         const nameLen = view.getUint16(offset + 26, true);
         const extraLen = view.getUint16(offset + 28, true);
+        if (offset + 30 + nameLen > buffer.byteLength) break;
         const nameBytes = new Uint8Array(buffer, offset + 30, nameLen);
         const name = new TextDecoder('utf-8').decode(nameBytes);
         const dataOffset = offset + 30 + nameLen + extraLen;
 
-        if (name === 'AndroidManifest.xml') {
+        if (name === 'AndroidManifest.xml' && compSize > 0 && dataOffset + compSize <= buffer.byteLength) {
           const raw = new Uint8Array(buffer, dataOffset, compSize);
-          if (method === 0) {
-            manifestBytes = raw;
-          } else if (method === 8) {
-            if (typeof DecompressionStream !== 'undefined') {
-              const ds = new DecompressionStream('deflate-raw');
-              const writer = ds.writable.getWriter();
-              writer.write(raw);
-              writer.close();
-              const decomp = await new Response(ds.readable).arrayBuffer();
-              manifestBytes = new Uint8Array(decomp);
-            } else {
-              try {
-                const mod = 'node:zlib';
-                const nodeZlib = await import(/* @vite-ignore */ mod);
-                manifestBytes = nodeZlib.inflateRawSync(Buffer.from(raw));
-              } catch {}
-            }
-          }
+          manifestBytes = await inflateManifestBytes(raw, method);
           break;
         }
+        if (compSize === 0) break;
         offset = dataOffset + compSize;
-      } else {
-        offset++;
       }
     }
 
-    if (!manifestBytes || manifestBytes.byteLength < 32) return null;
-    const axmlView = new DataView(manifestBytes.buffer, manifestBytes.byteOffset, manifestBytes.byteLength);
-
-    // Verify RES_XML_TYPE (0x0003)
-    if (axmlView.getUint16(0, true) !== 0x0003) return null;
-
-    // String pool header (0x0001)
-    const spOffset = 8;
-    if (axmlView.getUint16(spOffset, true) !== 0x0001) return null;
-    const stringCount = axmlView.getUint32(spOffset + 8, true);
-    const flags = axmlView.getUint32(spOffset + 16, true);
-    const isUtf8 = (flags & (1 << 8)) !== 0;
-    const stringsStart = spOffset + axmlView.getUint32(spOffset + 20, true);
-
-    const strings: string[] = [];
-    for (let i = 0; i < stringCount; i++) {
-      const strOffset = axmlView.getUint32(spOffset + 28 + i * 4, true);
-      const strPos = stringsStart + strOffset;
-      if (strPos >= manifestBytes.length) {
-        strings.push('');
-        continue;
-      }
-
-      if (isUtf8) {
-        let u8Pos = strPos;
-        if (manifestBytes[u8Pos] & 0x80) u8Pos += 2; else u8Pos += 1;
-        let u8Len = manifestBytes[u8Pos];
-        if (u8Len & 0x80) {
-          u8Len = ((u8Len & 0x7f) << 8) | manifestBytes[u8Pos + 1];
-          u8Pos += 2;
-        } else {
-          u8Pos += 1;
-        }
-        strings.push(new TextDecoder('utf-8').decode(manifestBytes.subarray(u8Pos, u8Pos + u8Len)));
-      } else {
-        const u16Len = axmlView.getUint16(strPos, true);
-        const sub = manifestBytes.subarray(strPos + 2, strPos + 2 + u16Len * 2);
-        strings.push(new TextDecoder('utf-16le').decode(sub));
-      }
-    }
-
-    // Skip string pool
-    let pos = 8 + axmlView.getUint32(spOffset + 4, true);
-
-    // Skip resource map (0x0180) if present
-    if (pos < manifestBytes.length && axmlView.getUint16(pos, true) === 0x0180) {
-      pos += axmlView.getUint32(pos + 4, true);
-    }
-
-    // Skip namespaces (0x0100)
-    while (pos < manifestBytes.length && axmlView.getUint16(pos, true) === 0x0100) {
-      pos += axmlView.getUint32(pos + 4, true);
-    }
-
-    let packageName = '';
-    let versionName = '';
-    let versionCode = 1;
-    let appLabel = '';
-
-    // Manifest Start Element (0x0102)
-    if (pos < manifestBytes.length && axmlView.getUint16(pos, true) === 0x0102) {
-      const attrCount = axmlView.getUint16(pos + 28, true);
-      for (let a = 0; a < attrCount; a++) {
-        const aOff = pos + 36 + a * 20;
-        const nameIdx = axmlView.getUint32(aOff + 4, true);
-        const valIdx = axmlView.getUint32(aOff + 8, true);
-        const rawData = axmlView.getUint32(aOff + 16, true);
-        const attrName = strings[nameIdx];
-
-        if (attrName === 'package') {
-          packageName = strings[valIdx] || '';
-        } else if (attrName === 'versionName') {
-          versionName = strings[valIdx] || '';
-        } else if (attrName === 'versionCode') {
-          versionCode = rawData || (strings[valIdx] ? parseInt(strings[valIdx], 10) : 1);
-        }
-      }
-    }
-
-    return {
-      packageName: packageName || undefined,
-      versionName: versionName || undefined,
-      versionCode: versionCode || undefined,
-      appLabel: appLabel || undefined,
-    };
+    return decodeBinaryManifestAxml(manifestBytes);
   } catch (err) {
     console.warn('extractManifestMetadataFromApk warning:', err);
     return null;
@@ -459,37 +540,99 @@ export async function extractManifestMetadataFromApk(buffer: ArrayBuffer): Promi
 }
 
 /**
- * Pure inspection logic that extracts or determines package identity from an APK binary.
+ * Streaming manifest extraction for File/Blob objects (never loads full 500MB APK into RAM).
  */
-export async function inspectApkBinary(
-  buffer: ArrayBuffer,
+export async function extractManifestMetadataFromFile(file: Blob): Promise<{
+  packageName?: string;
+  versionName?: string;
+  versionCode?: number;
+  appLabel?: string;
+} | null> {
+  try {
+    // For smaller APKs (< 32 MB), direct ArrayBuffer inspection is instantaneous
+    if (file.size <= 32 * 1024 * 1024) {
+      const buf = await file.arrayBuffer();
+      return extractManifestMetadataFromApk(buf);
+    }
+
+    // Read tail (last 512 KB) to find End of Central Directory + Central Directory
+    const tailWindow = Math.min(file.size, 512 * 1024);
+    const tailStart = file.size - tailWindow;
+    const tailBuf = await file.slice(tailStart, file.size).arrayBuffer();
+    const tailBytes = new Uint8Array(tailBuf);
+
+    let cdInfo = findManifestFromCentralDirectory(tailBytes, tailStart);
+
+    // If Central Directory was larger than 512KB tail, read exact Central Directory slice
+    if (cdInfo && cdInfo.localHeaderOffset < 0 && cdInfo.cdSize > 0 && cdInfo.cdOffset + cdInfo.cdSize <= file.size) {
+      const cdBuf = await file.slice(cdInfo.cdOffset, cdInfo.cdOffset + cdInfo.cdSize).arrayBuffer();
+      const cdBytes = new Uint8Array(cdBuf);
+      const cdView = new DataView(cdBuf);
+      let pos = 0;
+      while (pos + 46 <= cdBytes.byteLength) {
+        if (cdView.getUint32(pos, true) !== 0x02014b50) break;
+        const method = cdView.getUint16(pos + 10, true);
+        const compSize = cdView.getUint32(pos + 20, true);
+        const nameLen = cdView.getUint16(pos + 28, true);
+        const extraLen = cdView.getUint16(pos + 30, true);
+        const commentLen = cdView.getUint16(pos + 32, true);
+        const localHeaderOffset = cdView.getUint32(pos + 42, true);
+        const name = new TextDecoder('utf-8').decode(cdBytes.subarray(pos + 46, pos + 46 + nameLen));
+        if (name === 'AndroidManifest.xml') {
+          cdInfo = { method, compSize, localHeaderOffset, cdOffset: cdInfo.cdOffset, cdSize: cdInfo.cdSize };
+          break;
+        }
+        pos += 46 + nameLen + extraLen + commentLen;
+      }
+    }
+
+    if (cdInfo && cdInfo.localHeaderOffset >= 0 && cdInfo.compSize > 0) {
+      const lhStart = cdInfo.localHeaderOffset;
+      const lhHeadBuf = await file.slice(lhStart, Math.min(file.size, lhStart + 30)).arrayBuffer();
+      const lhView = new DataView(lhHeadBuf);
+      if (lhView.byteLength >= 30 && lhView.getUint32(0, true) === 0x04034b50) {
+        const nameLen = lhView.getUint16(26, true);
+        const extraLen = lhView.getUint16(28, true);
+        const dataOffset = lhStart + 30 + nameLen + extraLen;
+        const compBuf = await file.slice(dataOffset, dataOffset + cdInfo.compSize).arrayBuffer();
+        const manifestBytes = await inflateManifestBytes(new Uint8Array(compBuf), cdInfo.method);
+        return decodeBinaryManifestAxml(manifestBytes);
+      }
+    }
+
+    return null;
+  } catch (err) {
+    console.warn('extractManifestMetadataFromFile warning:', err);
+    return null;
+  }
+}
+
+async function buildParsedMetadata(
+  fileSizeBytes: number,
+  isValidZip: boolean,
+  sha256: string,
+  manifestMeta: {
+    packageName?: string;
+    versionName?: string;
+    versionCode?: number;
+    appLabel?: string;
+  } | null,
   fileName: string,
   targetPackageName?: string
 ): Promise<ParsedApkMetadata> {
-  const fileSizeBytes = buffer.byteLength;
-  const isValidZip = isZipArchive(buffer);
-  const sha256 = await calculateSha256(buffer);
-
-  // Attempt real Android binary manifest inspection first
-  const manifestMeta = await extractManifestMetadataFromApk(buffer);
-
-  // Derive package name: manifest package > targetPackageName > reverse-DNS in filename > sanitized name
   const cleanName = fileName.replace(/\.apk$/i, '');
   let extractedPackage = manifestMeta?.packageName || targetPackageName;
 
   if (!extractedPackage) {
-    // If filename has a dot e.g. com.example.calculator
     const pkgMatch = cleanName.match(/([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)/);
     if (pkgMatch && pkgMatch[1].includes('.')) {
       extractedPackage = pkgMatch[1];
     } else {
-      // Derive a unique package namespace based on the app filename so different apps never collide
       const safeSlug = cleanName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'app';
       extractedPackage = `com.appdrop.${safeSlug}`;
     }
   }
 
-  // Derive version name: manifest versionName > filename version > default 1.0.0
   let extractedVersionName = manifestMeta?.versionName;
   if (!extractedVersionName) {
     const versionMatch = cleanName.match(/(?:v|version-)?(\d+\.\d+(?:\.\d+)?)/i);
@@ -500,7 +643,6 @@ export async function inspectApkBinary(
     }
   }
 
-  // Derive version code: manifest versionCode > filename code > semver integer
   let extractedVersionCode = manifestMeta?.versionCode;
   if (!extractedVersionCode || extractedVersionCode <= 0) {
     const codeMatch = cleanName.match(/(?:code|c|build)-?(\d+)/i);
@@ -537,6 +679,39 @@ export async function inspectApkBinary(
       'android.permission.WAKE_LOCK',
     ],
   };
+}
+
+/**
+ * Streaming File/Blob APK inspector (safe for 500MB APKs without full-file memory buffers).
+ */
+export async function inspectApkFile(
+  file: Blob,
+  fileName: string,
+  targetPackageName?: string,
+  onHashProgress?: (progressPct: number) => void
+): Promise<ParsedApkMetadata> {
+  const headBuf = await file.slice(0, 4).arrayBuffer();
+  const isValidZip = isZipArchive(headBuf);
+  const [sha256, manifestMeta] = await Promise.all([
+    calculateSha256(file, onHashProgress),
+    isValidZip ? extractManifestMetadataFromFile(file) : Promise.resolve(null),
+  ]);
+  return buildParsedMetadata(file.size, isValidZip, sha256, manifestMeta, fileName, targetPackageName);
+}
+
+/**
+ * Pure inspection logic that extracts or determines package identity from an APK binary.
+ */
+export async function inspectApkBinary(
+  buffer: ArrayBuffer,
+  fileName: string,
+  targetPackageName?: string
+): Promise<ParsedApkMetadata> {
+  const fileSizeBytes = buffer.byteLength;
+  const isValidZip = isZipArchive(buffer);
+  const sha256 = await calculateSha256(buffer);
+  const manifestMeta = isValidZip ? await extractManifestMetadataFromApk(buffer) : null;
+  return buildParsedMetadata(fileSizeBytes, isValidZip, sha256, manifestMeta, fileName, targetPackageName);
 }
 
 /**

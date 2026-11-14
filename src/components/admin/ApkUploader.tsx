@@ -42,7 +42,6 @@ export const ApkUploader: React.FC = () => {
     startApkUpload,
     resetUploadProgress,
     navigateTo,
-    requestDownload,
   } = useApp();
 
   // Mode: direct auto-detect (no prior registration needed) or attach to existing app
@@ -660,7 +659,7 @@ export const ApkUploader: React.FC = () => {
                       </span>
                     </div>
                     <p className="text-[10px] text-neutral-500">
-                      Byte stream and original ZIP compression headers are 100% preserved intact in Firebase Cloud Storage, persistent IndexedDB, and server storage.
+                      Exact original byte stream, size, and SHA-256 digest verified intact in durable remote storage and local device cache.
                     </p>
                   </div>
                 )}
