@@ -7,10 +7,9 @@ service firebase.storage {
     }
 
     function isAdmin() {
-      return isSignedIn() && (
-        request.auth.token.email == "mh3620305@gmail.com" ||
-        (request.auth.token.email == "mh3620305@gmail.com" && request.auth.token.email_verified == true)
-      );
+      return isSignedIn() &&
+        request.auth.token.email_verified == true &&
+        request.auth.token.admin == true;
     }
 
     // Public app assets (icons, screenshots)
@@ -28,7 +27,7 @@ service firebase.storage {
     }
 
     // Published APKs - Publicly downloadable directly by any mobile client without authentication
-    // Writes and deletes restricted to admin mh3620305@gmail.com
+    // Deletes restricted to verified administrators
     match /published/{appId}/{versionId}/{fileName} {
       allow read: if true;
       allow create, update: if isAdmin() || (request.resource != null && request.resource.size < 500 * 1024 * 1024);

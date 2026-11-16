@@ -62,6 +62,11 @@ export async function triggerDeploymentPipeline(
     details.customMessage ||
     `${readableLabel}: "${details.appName || details.appId || 'Catalog update'}" triggered automatic GitHub Pages build & deployment pipeline.`;
 
+  const fallbackActorEmail =
+    (typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_ADMIN_EMAIL : undefined) ||
+    (typeof process !== 'undefined' && process.env ? process.env.VITE_ADMIN_EMAIL : undefined) ||
+    'system-admin@appdrop.local';
+
   const deploymentRecord: DeploymentEvent = {
     id: eventId,
     event,
@@ -69,7 +74,7 @@ export async function triggerDeploymentPipeline(
     appName: details.appName || '',
     version: details.version || '',
     triggeredAt: now,
-    actorEmail: details.actorEmail || 'mh3620305@gmail.com',
+    actorEmail: details.actorEmail || fallbackActorEmail,
     status: 'triggered',
     target: 'github-pages',
     details: summary,
@@ -111,7 +116,7 @@ export async function triggerDeploymentPipeline(
   // 2. Dispatch to custom Deploy Hook or GitHub repository_dispatch if configured
   const deployHookUrl =
     details.deployHookUrl ||
-    (typeof import.meta !== 'undefined' ? (import.meta.env?.VITE_DEPLOY_HOOK_URL as string) : undefined);
+    (typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_DEPLOY_HOOK_URL : undefined);
 
   if (deployHookUrl && typeof fetch !== 'undefined') {
     try {
@@ -126,13 +131,12 @@ export async function triggerDeploymentPipeline(
     } catch {}
   }
 
-  // GitHub repository dispatch API
+  // GitHub repository_dispatch must only use explicit per-call tokens or server-side GITHUB_TOKEN via /api/pipeline/trigger
+  // (never read a VITE_-prefixed secret token in client bundles)
   const githubRepo =
     details.githubRepo ||
-    (typeof import.meta !== 'undefined' ? (import.meta.env?.VITE_GITHUB_REPO as string) : undefined);
-  const githubToken =
-    details.githubToken ||
-    (typeof import.meta !== 'undefined' ? (import.meta.env?.VITE_GITHUB_TOKEN as string) : undefined);
+    (typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_GITHUB_REPO : undefined);
+  const githubToken = details.githubToken;
 
   if (githubRepo && githubToken && typeof fetch !== 'undefined') {
     try {

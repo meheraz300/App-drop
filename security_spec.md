@@ -6,11 +6,11 @@
 3. Mutations & Writes: All creations, metadata updates, status changes, rollbacks, and deletions require authenticated Administrator authority (`isAdmin()`).
 4. Audit Trail: Audit logs are append-only by verified administrators.
 5. System Configuration: System configuration can be read publicly for maintenance status, but only modified by administrators.
-6. Identity: Authenticated administrator is verified against configured administrative identity (`mh3620305@gmail.com`) with `email_verified == true` or presence in the `/admins` collection.
+6. Identity: Authenticated administrator is verified against the configured administrative identity (`VITE_ADMIN_EMAIL`) with `email_verified == true` and presence in the `/admins/{uid}` collection.
 
 ## 2. The Dirty Dozen Attack Payloads
 1. Spoofed Admin Claim: Anonymous user attempting to mutate `/apps/test-app` without token.
-2. Unverified Email Admin Spoof: Token with `email: 'mh3620305@gmail.com'` but `email_verified: false` attempting to update `/apps/test-app`.
+2. Unverified Email Admin Spoof: Token with admin email claim but `email_verified: false` attempting to update `/apps/test-app`.
 3. Unpublished App Leak: Anonymous user querying `/apps` with `status: 'draft'` or `status: 'archived'`.
 4. Staging APK / Upload Session Interception: Anonymous or non-admin user querying `/uploadSessions`.
 5. Direct Binary State Manipulation: Non-admin trying to update `apps/{appId}/versions/{versionId}` to set `status: 'published'`.

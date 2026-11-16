@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { ShieldCheck, Mail, AlertCircle, ArrowLeft } from 'lucide-react';
-import { ADMIN_CONFIGURED_EMAIL } from '../../lib/firebase';
+import { ADMIN_CONFIGURED_EMAIL, isAuthorizedAdminEmail } from '../../lib/firebase';
 import { GlassSurface, GlassButton } from '../common/GlassComponents';
 
 export const AdminLogin: React.FC = () => {
@@ -33,8 +33,13 @@ export const AdminLogin: React.FC = () => {
       return;
     }
 
+    if (!ADMIN_CONFIGURED_EMAIL) {
+      setErrorMsg('Administrator email is not configured (set VITE_ADMIN_EMAIL in .env).');
+      return;
+    }
+
     // Strict Admin Authorization: Enforce that ONLY the authorized admin email can access the panel
-    if (trimmedEmail !== ADMIN_CONFIGURED_EMAIL.toLowerCase()) {
+    if (!isAuthorizedAdminEmail(trimmedEmail)) {
       setErrorMsg('Unauthorized access. Invalid admin email.');
       return;
     }

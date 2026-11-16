@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -67,13 +68,26 @@ interface FirebaseConfigFile {
 }
 
 function loadFirebaseConfig(): FirebaseConfigFile | null {
+  let fileCfg: FirebaseConfigFile = {};
   try {
     const cfgPath = path.join(process.cwd(), 'firebase-applet-config.json');
     if (fs.existsSync(cfgPath)) {
-      return JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as FirebaseConfigFile;
+      fileCfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as FirebaseConfigFile;
     }
   } catch {}
-  return null;
+
+  const projectId =
+    process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || fileCfg.projectId;
+  const firestoreDatabaseId =
+    process.env.FIREBASE_FIRESTORE_DATABASE_ID ||
+    process.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ||
+    fileCfg.firestoreDatabaseId;
+  const apiKey = process.env.FIREBASE_API_KEY || process.env.VITE_FIREBASE_API_KEY || fileCfg.apiKey;
+
+  if (!projectId && !firestoreDatabaseId && !apiKey) {
+    return null;
+  }
+  return { projectId, firestoreDatabaseId, apiKey };
 }
 
 const rehydratingPromises = new Map<string, Promise<boolean>>();
@@ -710,7 +724,35 @@ for (const prefix of ROUTE_PREFIXES) {
   app.get(`${prefix}/api/apks/:versionId/download`, handleApkDownload);
   app.get(`${prefix}/api/apks/:versionId/status`, handleApkStatus);
   app.delete(`${prefix}/api/apks/:versionId`, handleApkDelete);
-  app.post(`${prefix}/api/pipeline/trigger`, (_req, res) => {
+  app.post(`${prefix}/api/pipeline/trigger`, jsonParser, async (req, res) => {
+    const githubRepo = process.env.GITHUB_REPO;
+    const githubToken = process.env.GITHUB_TOKEN;
+    const deployHookUrl = process.env.DEPLOY_HOOK_URL;
+    const payload = req.body || {};
+
+    if (deployHookUrl) {
+      fetch(deployHookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch(() => {});
+    }
+
+    if (githubRepo && githubToken) {
+      fetch(`https://api.github.com/repos/${githubRepo}/dispatches`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/vnd.github.v3+json',
+          Authorization: `Bearer ${githubToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          event_type: String(payload?.event || 'pipeline_rebuild').replace('.', '_'),
+          client_payload: payload,
+        }),
+      }).catch(() => {});
+    }
+
     res.json({ ok: true, message: 'Pipeline acknowledged.' });
   });
 }

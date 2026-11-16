@@ -25,6 +25,7 @@ import {
   db,
   googleAuthProvider,
   ADMIN_CONFIGURED_EMAIL,
+  isAuthorizedAdminEmail,
   testConnection,
   handleFirestoreError,
   OperationType,
@@ -450,7 +451,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
       if (fbUser) {
-        const isAdminEmail = fbUser.email?.toLowerCase() === ADMIN_CONFIGURED_EMAIL.toLowerCase();
+        const isAdminEmail = isAuthorizedAdminEmail(fbUser.email);
         setUser({
           uid: fbUser.uid,
           email: fbUser.email,
@@ -462,7 +463,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } else {
         // Check if there is an active simulated session in preview
         const simulated = sessionStorage.getItem('appdrop_simulated_admin');
-        if (simulated) {
+        if (simulated && ADMIN_CONFIGURED_EMAIL) {
           setUser({
             uid: 'admin_preview_uid',
             email: ADMIN_CONFIGURED_EMAIL,
@@ -648,7 +649,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const signInWithGoogle = async () => {
     try {
       const result = await signInWithPopup(auth, googleAuthProvider);
-      const isAdm = result.user.email?.toLowerCase() === ADMIN_CONFIGURED_EMAIL.toLowerCase();
+      const isAdm = isAuthorizedAdminEmail(result.user.email);
       setUser({
         uid: result.user.uid,
         email: result.user.email,
@@ -660,14 +661,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       navigateTo('admin-dashboard');
     } catch (err: any) {
       console.warn('Google popup sign-in note:', err);
-      // If popup fails (e.g. in hermetic iframe environment), offer quick simulation
+      // If popup fails (e.g. in hermetic iframe environment), offer quick simulation when configured
+      if (!ADMIN_CONFIGURED_EMAIL) {
+        throw new Error('Administrator email is not configured (set VITE_ADMIN_EMAIL in .env).');
+      }
       simulateAdminSignIn(ADMIN_CONFIGURED_EMAIL);
     }
   };
 
   const simulateAdminSignIn = (emailInput?: string) => {
+    if (!ADMIN_CONFIGURED_EMAIL) {
+      throw new Error('Administrator email is not configured (set VITE_ADMIN_EMAIL in .env).');
+    }
     const targetEmail = (emailInput || '').trim().toLowerCase();
-    if (targetEmail !== ADMIN_CONFIGURED_EMAIL.toLowerCase()) {
+    if (!isAuthorizedAdminEmail(targetEmail)) {
       throw new Error('Unauthorized access. Invalid admin email.');
     }
     sessionStorage.setItem('appdrop_simulated_admin', 'true');
@@ -699,7 +706,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newLog: AuditLog = {
       id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       actorUid: user?.uid || 'system_actor',
-      actorEmail: user?.email || ADMIN_CONFIGURED_EMAIL,
+      actorEmail: user?.email || ADMIN_CONFIGURED_EMAIL || 'system-admin@appdrop.local',
       action,
       appId,
       versionId,

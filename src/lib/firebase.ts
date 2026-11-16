@@ -17,7 +17,93 @@ import {
   setLogLevel,
 } from 'firebase/firestore';
 import { getStorage, FirebaseStorage } from 'firebase/storage';
-import firebaseConfig from '../../firebase-applet-config.json';
+import defaultFirebaseConfig from '../../firebase-applet-config.json';
+
+function normalizeEnv(viteVal: unknown, nodeVal: unknown): string {
+  const raw = typeof viteVal === 'string' && viteVal.length > 0 ? viteVal : nodeVal;
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+const hasProcessEnv = typeof process !== 'undefined' && Boolean(process.env);
+
+export const firebaseConfig = {
+  projectId:
+    normalizeEnv(
+      typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_FIREBASE_PROJECT_ID : undefined,
+      hasProcessEnv ? process.env.VITE_FIREBASE_PROJECT_ID : undefined
+    ) ||
+    defaultFirebaseConfig.projectId ||
+    '',
+  appId:
+    normalizeEnv(
+      typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_FIREBASE_APP_ID : undefined,
+      hasProcessEnv ? process.env.VITE_FIREBASE_APP_ID : undefined
+    ) ||
+    defaultFirebaseConfig.appId ||
+    '',
+  apiKey:
+    normalizeEnv(
+      typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_FIREBASE_API_KEY : undefined,
+      hasProcessEnv ? process.env.VITE_FIREBASE_API_KEY : undefined
+    ) ||
+    defaultFirebaseConfig.apiKey ||
+    '',
+  authDomain:
+    normalizeEnv(
+      typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_FIREBASE_AUTH_DOMAIN : undefined,
+      hasProcessEnv ? process.env.VITE_FIREBASE_AUTH_DOMAIN : undefined
+    ) ||
+    defaultFirebaseConfig.authDomain ||
+    '',
+  firestoreDatabaseId:
+    normalizeEnv(
+      typeof import.meta !== 'undefined' && import.meta.env
+        ? import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID
+        : undefined,
+      hasProcessEnv ? process.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID : undefined
+    ) ||
+    defaultFirebaseConfig.firestoreDatabaseId ||
+    '(default)',
+  storageBucket:
+    normalizeEnv(
+      typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_FIREBASE_STORAGE_BUCKET : undefined,
+      hasProcessEnv ? process.env.VITE_FIREBASE_STORAGE_BUCKET : undefined
+    ) ||
+    defaultFirebaseConfig.storageBucket ||
+    '',
+  messagingSenderId:
+    normalizeEnv(
+      typeof import.meta !== 'undefined' && import.meta.env
+        ? import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID
+        : undefined,
+      hasProcessEnv ? process.env.VITE_FIREBASE_MESSAGING_SENDER_ID : undefined
+    ) ||
+    defaultFirebaseConfig.messagingSenderId ||
+    '',
+  measurementId:
+    normalizeEnv(
+      typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_FIREBASE_MEASUREMENT_ID : undefined,
+      hasProcessEnv ? process.env.VITE_FIREBASE_MEASUREMENT_ID : undefined
+    ) ||
+    defaultFirebaseConfig.measurementId ||
+    '',
+  oAuthClientId:
+    normalizeEnv(
+      typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_FIREBASE_OAUTH_CLIENT_ID : undefined,
+      hasProcessEnv ? process.env.VITE_FIREBASE_OAUTH_CLIENT_ID : undefined
+    ) ||
+    defaultFirebaseConfig.oAuthClientId ||
+    '',
+  recaptchaSiteKey:
+    normalizeEnv(
+      typeof import.meta !== 'undefined' && import.meta.env
+        ? import.meta.env.VITE_FIREBASE_RECAPTCHA_SITE_KEY
+        : undefined,
+      hasProcessEnv ? process.env.VITE_FIREBASE_RECAPTCHA_SITE_KEY : undefined
+    ) ||
+    defaultFirebaseConfig.recaptchaSiteKey ||
+    '',
+};
 
 // Silence non-fatal network polling warnings in sandboxed/offline environments
 try {
@@ -215,5 +301,24 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-export const ADMIN_CONFIGURED_EMAIL = 'mh3620305@gmail.com';
+export const ADMIN_CONFIGURED_EMAIL = normalizeEnv(
+  typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_ADMIN_EMAIL : undefined,
+  hasProcessEnv ? process.env.VITE_ADMIN_EMAIL : undefined
+);
+
+/**
+ * Verifies an email against the configured administrator email from environment variables.
+ * Returns false whenever VITE_ADMIN_EMAIL is unconfigured or empty.
+ */
+export function isAuthorizedAdminEmail(
+  candidateEmail?: string | null,
+  configuredEmail: string = ADMIN_CONFIGURED_EMAIL
+): boolean {
+  const configured = (configuredEmail || '').trim().toLowerCase();
+  const candidate = (candidateEmail || '').trim().toLowerCase();
+  if (!configured || !candidate) {
+    return false;
+  }
+  return candidate === configured;
+}
 
