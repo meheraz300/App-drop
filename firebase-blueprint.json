@@ -136,6 +136,34 @@
         "details": { "type": "string", "maxLength": 1000 }
       },
       "required": ["event", "triggeredAt", "status", "target"]
+    },
+    "ApkBinaryManifest": {
+      "title": "ApkBinaryManifest",
+      "description": "Durable cross-deployment binary manifest for intact APK packages stored in Firestore",
+      "type": "object",
+      "properties": {
+        "versionId": { "type": "string", "maxLength": 128 },
+        "appId": { "type": "string", "maxLength": 128 },
+        "fileName": { "type": "string", "maxLength": 255 },
+        "totalBytes": { "type": "number" },
+        "sha256": { "type": "string", "maxLength": 64 },
+        "chunkCount": { "type": "number" },
+        "chunkSize": { "type": "number" },
+        "uploadedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["versionId", "appId", "fileName", "totalBytes", "sha256", "chunkCount", "chunkSize", "uploadedAt"]
+    },
+    "ApkBinaryChunk": {
+      "title": "ApkBinaryChunk",
+      "description": "Ordered base64 slice of an intact APK binary package",
+      "type": "object",
+      "properties": {
+        "index": { "type": "number" },
+        "offset": { "type": "number" },
+        "byteLength": { "type": "number" },
+        "data": { "type": "string", "maxLength": 960000 }
+      },
+      "required": ["index", "offset", "byteLength", "data"]
     }
   },
   "firestore": {
@@ -150,6 +178,14 @@
     "/versions/{versionId}": {
       "schema": { "$ref": "#/entities/AppVersion" },
       "description": "Top-level version records for direct real-time sync across applications"
+    },
+    "/apkBinaries/{versionId}": {
+      "schema": { "$ref": "#/entities/ApkBinaryManifest" },
+      "description": "Durable APK binary manifest for cross-device and cross-container download availability"
+    },
+    "/apkBinaries/{versionId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/ApkBinaryChunk" },
+      "description": "Ordered binary chunks of verified APK releases"
     },
     "/uploadSessions/{sessionId}": {
       "schema": { "$ref": "#/entities/UploadSession" },

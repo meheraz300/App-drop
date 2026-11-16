@@ -20,6 +20,7 @@ async function getFirestoreContext() {
       db: fireMod.db,
       doc: fsMod.doc,
       setDoc: fsMod.setDoc,
+      getDoc: fsMod.getDoc,
       getDocs: fsMod.getDocs,
       collection: fsMod.collection,
       query: fsMod.query,
@@ -635,11 +636,173 @@ export function formatUploadEta(seconds: number): string {
   return `${mins}m ${secs}s remaining`;
 }
 
+export function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  return (err as { name?: string }).name === 'AbortError';
+}
+
+function makeAbortError(message = 'Upload cancelled by administrator.'): Error {
+  if (typeof DOMException !== 'undefined') {
+    return new DOMException(message, 'AbortError');
+  }
+  const err = new Error(message);
+  err.name = 'AbortError';
+  return err;
+}
+
 /**
- * Uploads the intact APK binary to the full-stack server endpoint (/api/apks/upload).
- * Uses XMLHttpRequest with xhr.upload.onprogress to provide real-time, continuous
- * byte-by-byte transfer progress (1% to 100%) with live upload speed and ETA.
- * Enforces server-reported sizeBytes and sha256 match against original binary.
+ * Fast capability probe against the Express APK backend (/api/apks/stats).
+ * Prevents pushing multi-megabyte APK payloads into static hosts (e.g., GitHub Pages)
+ * or unreachable proxies that would hang for minutes before returning HTML 404/405.
+ */
+export async function probeServerUploadEndpoint(
+  preferredBasePath: string,
+  signal?: AbortSignal
+): Promise<{ available: boolean; apiBasePath: string; reason?: string }> {
+  if (typeof fetch === 'undefined') {
+    return { available: false, apiBasePath: preferredBasePath, reason: 'Fetch API unavailable' };
+  }
+  if (signal?.aborted) {
+    throw makeAbortError();
+  }
+
+  const candidates = Array.from(
+    new Set([preferredBasePath, preferredBasePath === '/App-drop' ? '' : '/App-drop'])
+  );
+
+  let lastReason = 'Backend server unreachable';
+
+  for (const prefix of candidates) {
+    if (signal?.aborted) throw makeAbortError();
+    const probeController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const onOuterAbort = () => probeController?.abort();
+    signal?.addEventListener('abort', onOuterAbort, { once: true });
+    const timer = probeController ? setTimeout(() => probeController.abort(), 3500) : null;
+
+    try {
+      const url = `${prefix}/api/apks/stats?_t=${Date.now()}`;
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: probeController?.signal,
+      });
+      if (!res.ok) {
+        lastReason = `${prefix || ''}/api/apks/stats returned HTTP ${res.status}`;
+        continue;
+      }
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (!ct.includes('application/json')) {
+        lastReason = `${prefix || ''}/api/apks/stats returned non-JSON (${ct || 'unknown'}) — likely static host without backend`;
+        continue;
+      }
+      const data = await res.json().catch(() => null);
+      if (data && typeof data.totalFiles === 'number') {
+        return { available: true, apiBasePath: prefix };
+      }
+      lastReason = `${prefix || ''}/api/apks/stats returned unexpected payload`;
+    } catch (err: any) {
+      if (signal?.aborted) {
+        throw makeAbortError();
+      }
+      lastReason = err?.name === 'AbortError'
+        ? `Backend probe timed out at ${prefix || ''}/api/apks/stats`
+        : err?.message || `Failed reaching ${prefix || ''}/api/apks/stats`;
+    } finally {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onOuterAbort);
+    }
+  }
+
+  return { available: false, apiBasePath: preferredBasePath, reason: lastReason };
+}
+
+function sendChunkViaXhr(
+  url: string,
+  chunkBlob: Blob,
+  onChunkLoaded: (loadedBytesInChunk: number) => void,
+  signal?: AbortSignal
+): Promise<{ status: number; responseText: string }> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(makeAbortError());
+      return;
+    }
+
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      try {
+        xhr.abort();
+      } catch {}
+      cleanup();
+      reject(makeAbortError());
+    };
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    xhr.upload.onprogress = (event) => {
+      if (!settled && event.lengthComputable && event.loaded > 0) {
+        onChunkLoaded(Math.min(chunkBlob.size, event.loaded));
+      }
+    };
+
+    xhr.onload = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ status: xhr.status, responseText: xhr.responseText });
+    };
+
+    xhr.onerror = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('Network error while transferring APK chunk'));
+    };
+
+    xhr.ontimeout = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('Chunk transfer timed out (45s)'));
+    };
+
+    xhr.onabort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(makeAbortError());
+    };
+
+    xhr.timeout = 45000; // 45s per 2 MB chunk
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.send(chunkBlob);
+  });
+}
+
+async function cleanupCancelledServerUpload(apiBasePath: string, versionId: string): Promise<void> {
+  if (typeof fetch === 'undefined') return;
+  try {
+    await fetch(`${apiBasePath}/api/apks/upload/${encodeURIComponent(versionId)}`, {
+      method: 'DELETE',
+    });
+  } catch {}
+}
+
+/**
+ * Uploads the intact APK binary to the full-stack server endpoint using 2 MB chunked streaming
+ * (/api/apks/upload/init -> /api/apks/upload/chunk -> /api/apks/upload/complete).
+ * Chunking avoids Cloud Run's 32 MB single-request limit, prevents mobile stall-outs, provides smooth
+ * real-time progress/speed/ETA, supports immediate AbortSignal cancellation, and enforces exact
+ * server-side byte-size and SHA-256 verification.
  */
 export async function uploadApkToServer(
   versionId: string,
@@ -647,168 +810,239 @@ export async function uploadApkToServer(
   fileName?: string,
   onProgress?: (progress: UploadProgressData) => void,
   appId?: string,
-  expectedSha256?: string
+  expectedSha256?: string,
+  signal?: AbortSignal,
+  onDiagnosticError?: (reason: string) => void
 ): Promise<{ downloadUrl: string; sizeBytes: number; sha256?: string } | null> {
-  const cleanFileName = fileName || (blob instanceof File ? blob.name : `${versionId}.apk`);
-  const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
-  const basePath = getApiBasePath();
-  const shaParam = expectedSha256 ? `&expectedSha256=${encodeURIComponent(expectedSha256)}` : '';
-
-  // Browser environment: use XMLHttpRequest for real upload progress events
-  if (typeof XMLHttpRequest !== 'undefined') {
-    return new Promise((resolve) => {
-      try {
-        const xhr = new XMLHttpRequest();
-        const uploadUrl = `${basePath}/api/apks/upload?versionId=${encodeURIComponent(versionId)}&appId=${encodeURIComponent(appId || '')}&fileName=${encodeURIComponent(cleanFileName)}&expectedSize=${blob.size}${shaParam}`;
-
-        xhr.upload.onprogress = (event) => {
-          if (event.lengthComputable && event.total > 0 && onProgress) {
-            const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-            const elapsedSec = Math.max(0.01, (now - startTime) / 1000);
-            const loaded = event.loaded;
-            const total = event.total;
-            const percentage = Math.min(100, Math.max(1, Math.round((loaded / total) * 100)));
-            const speedBytesPerSec = loaded / elapsedSec;
-            const remainingBytes = Math.max(0, total - loaded);
-            const etaSeconds = speedBytesPerSec > 0 ? remainingBytes / speedBytesPerSec : 0;
-
-            onProgress({
-              percentage,
-              loadedBytes: loaded,
-              totalBytes: total,
-              speedBytesPerSec,
-              speedFormatted: formatUploadSpeed(speedBytesPerSec),
-              etaSeconds,
-              etaFormatted: formatUploadEta(etaSeconds),
-              transferredFormatted: `${formatByteSize(loaded)} / ${formatByteSize(total)}`,
-            });
-          }
-        };
-
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            let data: any = null;
-            try {
-              data = JSON.parse(xhr.responseText);
-            } catch {
-              // Reject HTML/non-JSON responses (e.g., static hosting SPA fallback)
-              resolve(null);
-              return;
-            }
-
-            if (!data || data.success !== true) {
-              resolve(null);
-              return;
-            }
-
-            // Verify server stored exact byte length and SHA-256
-            if (typeof data.sizeBytes === 'number' && data.sizeBytes !== blob.size) {
-              console.warn(`[Upload] Server byte count mismatch: expected ${blob.size}, got ${data.sizeBytes}`);
-              resolve(null);
-              return;
-            }
-            if (expectedSha256 && data.sha256 && data.sha256.toLowerCase() !== expectedSha256.toLowerCase()) {
-              console.warn(`[Upload] Server SHA-256 mismatch: expected ${expectedSha256}, got ${data.sha256}`);
-              resolve(null);
-              return;
-            }
-
-            if (onProgress) {
-              const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-              const elapsedSec = Math.max(0.01, (now - startTime) / 1000);
-              const speedBytesPerSec = blob.size / elapsedSec;
-              onProgress({
-                percentage: 100,
-                loadedBytes: blob.size,
-                totalBytes: blob.size,
-                speedBytesPerSec,
-                speedFormatted: formatUploadSpeed(speedBytesPerSec),
-                etaSeconds: 0,
-                etaFormatted: 'Complete',
-                transferredFormatted: `${formatByteSize(blob.size)} / ${formatByteSize(blob.size)}`,
-              });
-            }
-
-            resolve({
-              downloadUrl: data.downloadUrl || `${basePath}/api/apks/${versionId}/download`,
-              sizeBytes: data.sizeBytes || blob.size,
-              sha256: data.sha256,
-            });
-            return;
-          }
-          resolve(null);
-        };
-
-        xhr.onerror = () => resolve(null);
-        xhr.ontimeout = () => resolve(null);
-        xhr.timeout = 300000; // 5 min timeout for very large APK files (up to 500MB)
-
-        xhr.open('POST', uploadUrl, true);
-        const formData = new FormData();
-        formData.append('versionId', versionId);
-        if (appId) formData.append('appId', appId);
-        formData.append('fileName', cleanFileName);
-        formData.append('fileSize', String(blob.size));
-        formData.append('expectedSize', String(blob.size));
-        if (expectedSha256) formData.append('expectedSha256', expectedSha256);
-        formData.append('file', blob, cleanFileName);
-        xhr.send(formData);
-      } catch (err) {
-        console.warn('uploadApkToServer XHR error:', err);
-        resolve(null);
-      }
-    });
+  if (signal?.aborted) {
+    throw makeAbortError();
   }
 
-  // Node.js or fallback environment
+  const cleanFileName = fileName || (blob instanceof File ? blob.name : `${versionId}.apk`);
+  const preferredBasePath = getApiBasePath();
+  const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+  const probe = await probeServerUploadEndpoint(preferredBasePath, signal);
+  if (!probe.available) {
+    onDiagnosticError?.(probe.reason || 'Express backend APK server unavailable');
+    return null;
+  }
+
+  const apiBasePath = probe.apiBasePath;
+
   try {
-    if (typeof fetch !== 'undefined') {
-      const formData = new FormData();
-      formData.append('versionId', versionId);
-      if (appId) formData.append('appId', appId);
-      formData.append('fileName', cleanFileName);
-      formData.append('fileSize', String(blob.size));
-      formData.append('expectedSize', String(blob.size));
-      if (expectedSha256) formData.append('expectedSha256', expectedSha256);
-      formData.append('file', blob, cleanFileName);
+    // 1. Initialize chunked upload session
+    const initRes = await fetch(`${apiBasePath}/api/apks/upload/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        versionId,
+        appId: appId || '',
+        fileName: cleanFileName,
+        expectedSize: blob.size,
+        expectedSha256: expectedSha256 || '',
+      }),
+      signal,
+    });
 
-      const res = await fetch(
-        `${basePath}/api/apks/upload?versionId=${encodeURIComponent(versionId)}&appId=${encodeURIComponent(appId || '')}&fileName=${encodeURIComponent(cleanFileName)}&expectedSize=${blob.size}${shaParam}`,
-        {
-          method: 'POST',
-          body: formData,
-        }
-      );
-      if (res.ok) {
-        const ct = res.headers.get('content-type') || '';
-        if (!ct.includes('application/json')) return null;
-        const json = await res.json().catch(() => null);
-        if (!json || json.success !== true) return null;
-        if (typeof json.sizeBytes === 'number' && json.sizeBytes !== blob.size) return null;
-        if (expectedSha256 && json.sha256 && json.sha256.toLowerCase() !== expectedSha256.toLowerCase()) return null;
-
-        if (onProgress) {
-          onProgress({
-            percentage: 100,
-            loadedBytes: blob.size,
-            totalBytes: blob.size,
-            speedBytesPerSec: 0,
-            speedFormatted: 'Done',
-            etaSeconds: 0,
-            etaFormatted: 'Complete',
-            transferredFormatted: `${formatByteSize(blob.size)} / ${formatByteSize(blob.size)}`,
-          });
-        }
-        return {
-          downloadUrl: json.downloadUrl || `${basePath}/api/apks/${versionId}/download`,
-          sizeBytes: json.sizeBytes || blob.size,
-          sha256: json.sha256,
-        };
-      }
+    if (!initRes.ok) {
+      const errJson = await initRes.json().catch(() => null);
+      const reason = errJson?.error || `Chunk init failed (HTTP ${initRes.status})`;
+      onDiagnosticError?.(reason);
+      return null;
     }
-  } catch {}
 
-  return null;
+    const initData = await initRes.json().catch(() => null);
+    const chunkSize = Math.min(4 * 1024 * 1024, Math.max(512 * 1024, Number(initData?.chunkSize) || 2 * 1024 * 1024));
+    const totalBytes = blob.size;
+
+    const emitProgress = (loadedBytes: number) => {
+      if (!onProgress || loadedBytes <= 0 || totalBytes <= 0) return;
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
+      const clampedLoaded = Math.min(totalBytes, loadedBytes);
+      const percentage = Math.min(99, Math.max(1, Math.round((clampedLoaded / totalBytes) * 100)));
+      const speedBytesPerSec = clampedLoaded / elapsedSec;
+      const remainingBytes = Math.max(0, totalBytes - clampedLoaded);
+      const etaSeconds = speedBytesPerSec > 0 ? remainingBytes / speedBytesPerSec : 0;
+
+      onProgress({
+        percentage,
+        loadedBytes: clampedLoaded,
+        totalBytes,
+        speedBytesPerSec,
+        speedFormatted: formatUploadSpeed(speedBytesPerSec),
+        etaSeconds,
+        etaFormatted: formatUploadEta(etaSeconds),
+        transferredFormatted: `${formatByteSize(clampedLoaded)} / ${formatByteSize(totalBytes)}`,
+      });
+    };
+
+    // 2. Stream sequential 2 MB binary chunks with retry + cancellation support
+    let offset = 0;
+    let chunkIndex = 0;
+    while (offset < totalBytes) {
+      if (signal?.aborted) {
+        await cleanupCancelledServerUpload(apiBasePath, versionId);
+        throw makeAbortError();
+      }
+
+      const end = Math.min(totalBytes, offset + chunkSize);
+      const slice = blob.slice(offset, end);
+      const chunkUrl = `${apiBasePath}/api/apks/upload/chunk?versionId=${encodeURIComponent(versionId)}&offset=${offset}&index=${chunkIndex}`;
+
+      let chunkUploaded = false;
+      let lastChunkErr = 'Chunk transfer failed';
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (signal?.aborted) {
+          await cleanupCancelledServerUpload(apiBasePath, versionId);
+          throw makeAbortError();
+        }
+
+        try {
+          if (typeof XMLHttpRequest !== 'undefined') {
+            const resp = await sendChunkViaXhr(
+              chunkUrl,
+              slice,
+              (inChunkLoaded) => emitProgress(offset + inChunkLoaded),
+              signal
+            );
+
+            if (resp.status >= 200 && resp.status < 300) {
+              const json = JSON.parse(resp.responseText || '{}');
+              if (json?.success === true) {
+                chunkUploaded = true;
+                break;
+              }
+              lastChunkErr = json?.error || 'Server rejected chunk';
+            } else {
+              let serverMsg = `HTTP ${resp.status}`;
+              try {
+                const parsedErr = JSON.parse(resp.responseText);
+                if (parsedErr?.error) serverMsg = `${serverMsg}: ${parsedErr.error}`;
+              } catch {}
+              lastChunkErr = serverMsg;
+              if (resp.status >= 400 && resp.status < 500 && resp.status !== 408 && resp.status !== 429) {
+                break; // Do not retry deterministic client errors
+              }
+            }
+          } else {
+            const res = await fetch(chunkUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/octet-stream' },
+              body: slice,
+              signal,
+            });
+            if (res.ok) {
+              const json = await res.json().catch(() => null);
+              if (json?.success === true) {
+                chunkUploaded = true;
+                break;
+              }
+            }
+            const errJson = await res.json().catch(() => null);
+            lastChunkErr = errJson?.error || `HTTP ${res.status}`;
+            if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+              break;
+            }
+          }
+        } catch (chunkErr: any) {
+          if (isAbortError(chunkErr) || signal?.aborted) {
+            await cleanupCancelledServerUpload(apiBasePath, versionId);
+            throw makeAbortError();
+          }
+          lastChunkErr = chunkErr?.message || 'Chunk network error';
+        }
+
+        // Brief backoff before retrying transient chunk glitch
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        }
+      }
+
+      if (!chunkUploaded) {
+        await cleanupCancelledServerUpload(apiBasePath, versionId);
+        onDiagnosticError?.(`Chunk ${chunkIndex + 1} failed (${lastChunkErr})`);
+        return null;
+      }
+
+      offset = end;
+      chunkIndex++;
+      emitProgress(offset);
+    }
+
+    if (signal?.aborted) {
+      await cleanupCancelledServerUpload(apiBasePath, versionId);
+      throw makeAbortError();
+    }
+
+    // 3. Finalize & verify exact assembled byte size + SHA-256 on server disk
+    const completeRes = await fetch(`${apiBasePath}/api/apks/upload/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        versionId,
+        appId: appId || '',
+        fileName: cleanFileName,
+        expectedSize: blob.size,
+        expectedSha256: expectedSha256 || '',
+      }),
+      signal,
+    });
+
+    if (!completeRes.ok) {
+      const errJson = await completeRes.json().catch(() => null);
+      const reason = errJson?.error || `Upload verification failed (HTTP ${completeRes.status})`;
+      await cleanupCancelledServerUpload(apiBasePath, versionId);
+      onDiagnosticError?.(reason);
+      return null;
+    }
+
+    const data = await completeRes.json().catch(() => null);
+    if (!data || data.success !== true) {
+      onDiagnosticError?.('Server returned invalid completion payload');
+      return null;
+    }
+
+    if (typeof data.sizeBytes === 'number' && data.sizeBytes !== blob.size) {
+      onDiagnosticError?.(`Server byte mismatch: expected ${blob.size}, stored ${data.sizeBytes}`);
+      return null;
+    }
+    if (expectedSha256 && data.sha256 && data.sha256.toLowerCase() !== expectedSha256.toLowerCase()) {
+      onDiagnosticError?.(`Server SHA-256 mismatch: expected ${expectedSha256}, stored ${data.sha256}`);
+      return null;
+    }
+
+    if (onProgress) {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
+      const speedBytesPerSec = blob.size / elapsedSec;
+      onProgress({
+        percentage: 100,
+        loadedBytes: blob.size,
+        totalBytes: blob.size,
+        speedBytesPerSec,
+        speedFormatted: formatUploadSpeed(speedBytesPerSec),
+        etaSeconds: 0,
+        etaFormatted: 'Complete',
+        transferredFormatted: `${formatByteSize(blob.size)} / ${formatByteSize(blob.size)}`,
+      });
+    }
+
+    return {
+      downloadUrl: data.downloadUrl || `${apiBasePath}/api/apks/${versionId}/download`,
+      sizeBytes: data.sizeBytes || blob.size,
+      sha256: data.sha256,
+    };
+  } catch (err: any) {
+    if (isAbortError(err) || signal?.aborted) {
+      await cleanupCancelledServerUpload(apiBasePath, versionId);
+      throw makeAbortError();
+    }
+    onDiagnosticError?.(err?.message || 'Unexpected server upload error');
+    return null;
+  }
 }
 
 /**
@@ -821,21 +1055,37 @@ export async function uploadApkToCloudStorage(
   versionId: string,
   fileName: string,
   blob: Blob | File,
-  onProgress?: (progress: UploadProgressData) => void
+  onProgress?: (progress: UploadProgressData) => void,
+  signal?: AbortSignal,
+  onDiagnosticError?: (reason: string) => void
 ): Promise<{ downloadUrl: string; storagePath: string } | null> {
+  if (signal?.aborted) {
+    throw makeAbortError();
+  }
+
   const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
   try {
     const { storage, app } = await import('./firebase');
     const { ref, uploadBytesResumable, getDownloadURL, getMetadata } = await import('firebase/storage');
 
     if (!storage) {
+      onDiagnosticError?.('Firebase Storage SDK uninitialized');
       return null;
     }
 
-    const bucketAvailable = await isCloudStorageBucketAvailable(app?.options?.storageBucket);
+    const bucketName = app?.options?.storageBucket || '';
+    const bucketAvailable = await isCloudStorageBucketAvailable(bucketName);
     if (!bucketAvailable) {
-      console.warn('[CloudStorage] Bucket unavailable (404/unreachable); using verified server binary store.');
+      onDiagnosticError?.(
+        bucketName
+          ? `Firebase Cloud Storage bucket "${bucketName}" is not provisioned (HTTP 404)`
+          : 'No Firebase Cloud Storage bucket configured'
+      );
       return null;
+    }
+
+    if (signal?.aborted) {
+      throw makeAbortError();
     }
 
     try {
@@ -860,16 +1110,29 @@ export async function uploadApkToCloudStorage(
 
     const uploadTask = uploadBytesResumable(storageRef, blob, metadata);
 
-    return await new Promise<{ downloadUrl: string; storagePath: string } | null>((resolve) => {
+    return await new Promise<{ downloadUrl: string; storagePath: string } | null>((resolve, reject) => {
+      const onAbort = () => {
+        try {
+          uploadTask.cancel();
+        } catch {}
+        reject(makeAbortError());
+      };
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      const cleanupAbortListener = () => {
+        signal?.removeEventListener('abort', onAbort);
+      };
+
       uploadTask.on(
         'state_changed',
         (snapshot) => {
-          if (snapshot.totalBytes > 0 && onProgress) {
+          if (snapshot.totalBytes > 0 && snapshot.bytesTransferred > 0 && onProgress) {
             const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-            const elapsedSec = Math.max(0.01, (now - startTime) / 1000);
+            const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
             const loaded = snapshot.bytesTransferred;
             const total = snapshot.totalBytes;
-            const percentage = Math.min(100, Math.max(1, Math.round((loaded / total) * 100)));
+            const percentage = Math.min(99, Math.max(1, Math.round((loaded / total) * 100)));
             const speedBytesPerSec = loaded / elapsedSec;
             const remainingBytes = Math.max(0, total - loaded);
             const etaSeconds = speedBytesPerSec > 0 ? remainingBytes / speedBytesPerSec : 0;
@@ -887,22 +1150,32 @@ export async function uploadApkToCloudStorage(
           }
         },
         (error) => {
-          console.warn('Firebase Cloud Storage upload task notice:', error.message);
+          cleanupAbortListener();
+          if (signal?.aborted || (error as any)?.code === 'storage/canceled') {
+            reject(makeAbortError());
+            return;
+          }
+          onDiagnosticError?.(error.message || 'Firebase Cloud Storage transfer failed');
           resolve(null);
         },
         async () => {
+          cleanupAbortListener();
+          if (signal?.aborted) {
+            reject(makeAbortError());
+            return;
+          }
           try {
             // Verify uploaded object size on Cloud Storage before resolving success
             const storedMeta = await getMetadata(uploadTask.snapshot.ref);
             if (typeof storedMeta.size === 'number' && storedMeta.size !== blob.size) {
-              console.warn(`[CloudStorage] Size mismatch: expected ${blob.size}, stored ${storedMeta.size}`);
+              onDiagnosticError?.(`Cloud Storage size mismatch: expected ${blob.size}, stored ${storedMeta.size}`);
               resolve(null);
               return;
             }
 
             if (onProgress) {
               const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-              const elapsedSec = Math.max(0.01, (now - startTime) / 1000);
+              const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
               const speedBytesPerSec = blob.size / elapsedSec;
               onProgress({
                 percentage: 100,
@@ -917,8 +1190,8 @@ export async function uploadApkToCloudStorage(
             }
             const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
             resolve({ downloadUrl, storagePath });
-          } catch (urlErr) {
-            console.warn('Failed to verify uploaded Cloud Storage object:', urlErr);
+          } catch (urlErr: any) {
+            onDiagnosticError?.(urlErr?.message || 'Failed to verify uploaded Cloud Storage object');
             resolve(null);
           }
         }
@@ -926,20 +1199,386 @@ export async function uploadApkToCloudStorage(
 
       // Catch immediate promise rejections from CORS / network faults
       uploadTask.catch((err) => {
-        console.warn('Firebase Storage uploadTask rejected:', err?.message || err);
+        cleanupAbortListener();
+        if (signal?.aborted || err?.code === 'storage/canceled') {
+          reject(makeAbortError());
+          return;
+        }
+        onDiagnosticError?.(err?.message || 'Cloud Storage rejected upload');
         resolve(null);
       });
     });
-  } catch (err) {
-    console.warn('uploadApkToCloudStorage note:', err);
+  } catch (err: any) {
+    if (isAbortError(err) || signal?.aborted) {
+      throw makeAbortError();
+    }
+    onDiagnosticError?.(err?.message || 'Cloud Storage initialization failed');
+    return null;
+  }
+}
+
+export const FIRESTORE_BINARY_CHUNK_BYTES = 600 * 1024; // 600 KB raw -> ~800 KB base64 (< 1 MiB doc limit)
+export const FIRESTORE_BINARY_MAX_BYTES = 100 * 1024 * 1024; // 100 MB max (<= 175 chunks, rules limit 250)
+
+export interface BinaryChunkPlan {
+  chunkSize: number;
+  chunkCount: number;
+  totalBytes: number;
+  ranges: Array<{ index: number; offset: number; end: number; byteLength: number }>;
+}
+
+export function planBinaryChunks(
+  totalBytes: number,
+  chunkSize: number = FIRESTORE_BINARY_CHUNK_BYTES
+): BinaryChunkPlan {
+  const safeChunkSize = Math.max(1024, chunkSize);
+  const ranges: BinaryChunkPlan['ranges'] = [];
+  if (totalBytes <= 0 || !Number.isFinite(totalBytes)) {
+    return { chunkSize: safeChunkSize, chunkCount: 0, totalBytes: 0, ranges };
+  }
+  let offset = 0;
+  let index = 0;
+  while (offset < totalBytes) {
+    const end = Math.min(totalBytes, offset + safeChunkSize);
+    ranges.push({ index, offset, end, byteLength: end - offset });
+    offset = end;
+    index++;
+  }
+  return {
+    chunkSize: safeChunkSize,
+    chunkCount: ranges.length,
+    totalBytes,
+    ranges,
+  };
+}
+
+export function buildDirectApkDownloadUrl(
+  versionId: string,
+  fileName: string,
+  apiBasePath: string
+): string {
+  const cleanPrefix = apiBasePath === '/App-drop' ? '/App-drop' : '';
+  return `${cleanPrefix}/api/apks/${encodeURIComponent(versionId)}/download?filename=${encodeURIComponent(fileName)}`;
+}
+
+/**
+ * Deletes durable binary manifest & chunks stored in Firestore /apkBinaries/{versionId}.
+ */
+export async function deleteApkBinaryFromFirestoreBinaries(versionId: string): Promise<void> {
+  try {
+    const fsContext = await getFirestoreContext();
+    if (!fsContext?.db) return;
+    const { db, collection, getDocs, deleteDoc, doc } = fsContext;
+    const chunksSnap = await getDocs(collection(db, 'apkBinaries', versionId, 'chunks')).catch(() => null);
+    if (chunksSnap) {
+      const docs = chunksSnap.docs;
+      for (let i = 0; i < docs.length; i += 10) {
+        await Promise.all(docs.slice(i, i + 10).map((d) => deleteDoc(d.ref).catch(() => {})));
+      }
+    }
+    await deleteDoc(doc(db, 'apkBinaries', versionId)).catch(() => {});
+  } catch {}
+}
+
+/**
+ * Uploads the intact original APK binary as ordered 600 KB base64 slices into Firestore (/apkBinaries/{versionId}).
+ * Ensures cross-container (ais-dev <-> ais-pre), restart-safe, and static-host (GitHub Pages) availability
+ * even when Firebase Cloud Storage bucket is not provisioned.
+ */
+export async function uploadApkToFirestoreBinaries(
+  appId: string,
+  versionId: string,
+  fileName: string,
+  blob: Blob | File,
+  expectedSha256: string,
+  onProgress?: (progress: UploadProgressData) => void,
+  signal?: AbortSignal,
+  onDiagnosticError?: (reason: string) => void
+): Promise<{ versionId: string; chunkCount: number; totalBytes: number } | null> {
+  if (signal?.aborted) {
+    throw makeAbortError();
+  }
+
+  if (blob.size <= 0) {
+    onDiagnosticError?.('Cannot mirror empty APK to Firestore');
+    return null;
+  }
+
+  if (blob.size > FIRESTORE_BINARY_MAX_BYTES) {
+    onDiagnosticError?.(
+      `APK size (${formatByteSize(blob.size)}) exceeds 100 MB Firestore cross-device mirror limit`
+    );
+    return null;
+  }
+
+  const fsContext = await getFirestoreContext();
+  if (!fsContext?.db) {
+    onDiagnosticError?.('Firestore client unavailable');
+    return null;
+  }
+
+  const { db, doc, setDoc } = fsContext;
+  const plan = planBinaryChunks(blob.size, FIRESTORE_BINARY_CHUNK_BYTES);
+  const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  let uploadedBytes = 0;
+
+  try {
+    const CONCURRENCY = 6;
+    for (let i = 0; i < plan.ranges.length; i += CONCURRENCY) {
+      if (signal?.aborted) {
+        await deleteApkBinaryFromFirestoreBinaries(versionId);
+        throw makeAbortError();
+      }
+
+      const batch = plan.ranges.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        batch.map(async (chunkSpec) => {
+          if (signal?.aborted) throw makeAbortError();
+          const sliceBuf = await blob.slice(chunkSpec.offset, chunkSpec.end).arrayBuffer();
+          if (signal?.aborted) throw makeAbortError();
+          const b64 = bufferToBase64(sliceBuf);
+
+          let lastErr: unknown = null;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            if (signal?.aborted) throw makeAbortError();
+            try {
+              await setDoc(
+                doc(db, 'apkBinaries', versionId, 'chunks', String(chunkSpec.index)),
+                {
+                  index: chunkSpec.index,
+                  offset: chunkSpec.offset,
+                  byteLength: chunkSpec.byteLength,
+                  data: b64,
+                }
+              );
+              lastErr = null;
+              break;
+            } catch (err) {
+              lastErr = err;
+              if (attempt < 2) {
+                await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+              }
+            }
+          }
+          if (lastErr) throw lastErr;
+
+          uploadedBytes += chunkSpec.byteLength;
+          if (onProgress && uploadedBytes > 0) {
+            const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
+            const pct = Math.min(99, Math.max(1, Math.round((uploadedBytes / blob.size) * 100)));
+            const speed = uploadedBytes / elapsedSec;
+            const remaining = Math.max(0, blob.size - uploadedBytes);
+            onProgress({
+              percentage: pct,
+              loadedBytes: uploadedBytes,
+              totalBytes: blob.size,
+              speedBytesPerSec: speed,
+              speedFormatted: formatUploadSpeed(speed),
+              etaSeconds: speed > 0 ? remaining / speed : 0,
+              etaFormatted: formatUploadEta(speed > 0 ? remaining / speed : 0),
+              transferredFormatted: `${formatByteSize(uploadedBytes)} / ${formatByteSize(blob.size)}`,
+            });
+          }
+        })
+      );
+    }
+
+    if (signal?.aborted) {
+      await deleteApkBinaryFromFirestoreBinaries(versionId);
+      throw makeAbortError();
+    }
+
+    // Write manifest LAST so incomplete chunk sets are never marked complete
+    await setDoc(doc(db, 'apkBinaries', versionId), {
+      versionId,
+      appId,
+      fileName: fileName.slice(0, 255),
+      totalBytes: blob.size,
+      sha256: expectedSha256.toLowerCase(),
+      chunkCount: plan.chunkCount,
+      chunkSize: plan.chunkSize,
+      uploadedAt: new Date().toISOString(),
+    });
+
+    if (onProgress) {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
+      const speed = blob.size / elapsedSec;
+      onProgress({
+        percentage: 100,
+        loadedBytes: blob.size,
+        totalBytes: blob.size,
+        speedBytesPerSec: speed,
+        speedFormatted: formatUploadSpeed(speed),
+        etaSeconds: 0,
+        etaFormatted: 'Complete',
+        transferredFormatted: `${formatByteSize(blob.size)} / ${formatByteSize(blob.size)}`,
+      });
+    }
+
+    return {
+      versionId,
+      chunkCount: plan.chunkCount,
+      totalBytes: blob.size,
+    };
+  } catch (err: any) {
+    if (isAbortError(err) || signal?.aborted) {
+      await deleteApkBinaryFromFirestoreBinaries(versionId);
+      throw makeAbortError();
+    }
+    await deleteApkBinaryFromFirestoreBinaries(versionId);
+    onDiagnosticError?.(err?.message || 'Firestore binary upload failed');
     return null;
   }
 }
 
 /**
+ * Retrieves and mathematically verifies the original APK binary from Firestore /apkBinaries/{versionId}.
+ */
+export async function fetchApkFromFirestoreBinaries(
+  versionId: string,
+  expectedSha256?: string,
+  expectedSizeBytes?: number,
+  onProgress?: (progress: DownloadVerificationProgress) => void
+): Promise<Blob | null> {
+  const fsContext = await getFirestoreContext();
+  if (!fsContext?.db) return null;
+
+  const { db, doc, getDoc } = fsContext;
+  const manifestSnap = await getDoc(doc(db, 'apkBinaries', versionId)).catch(() => null);
+  if (!manifestSnap || !manifestSnap.exists()) {
+    return null;
+  }
+
+  const manifest = manifestSnap.data() as {
+    totalBytes?: number;
+    sha256?: string;
+    chunkCount?: number;
+  };
+  const totalBytes = Number(manifest.totalBytes || 0);
+  const chunkCount = Number(manifest.chunkCount || 0);
+  if (!totalBytes || totalBytes <= 0 || !chunkCount || chunkCount <= 0) {
+    return null;
+  }
+
+  if (expectedSizeBytes && expectedSizeBytes > 0 && totalBytes !== expectedSizeBytes) {
+    return null;
+  }
+
+  const assembled = new Uint8Array(totalBytes);
+  let loadedBytes = 0;
+  const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const CONCURRENCY = 8;
+
+  for (let start = 0; start < chunkCount; start += CONCURRENCY) {
+    const end = Math.min(chunkCount, start + CONCURRENCY);
+    const indices = Array.from({ length: end - start }, (_, idx) => start + idx);
+    const results = await Promise.all(
+      indices.map(async (idx) => {
+        const snap = await getDoc(doc(db, 'apkBinaries', versionId, 'chunks', String(idx)));
+        if (!snap.exists()) {
+          throw new Error(`Missing Firestore binary chunk ${idx} for ${versionId}`);
+        }
+        const chunkData = snap.data() as { offset?: number; data?: string };
+        if (!chunkData?.data) {
+          throw new Error(`Empty Firestore binary chunk ${idx} for ${versionId}`);
+        }
+        return {
+          offset: Number(chunkData.offset || 0),
+          bytes: base64ToUint8Array(chunkData.data),
+        };
+      })
+    );
+
+    for (const part of results) {
+      assembled.set(part.bytes, part.offset);
+      loadedBytes += part.bytes.byteLength;
+    }
+
+    if (onProgress) {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const elapsed = Math.max(0.05, (now - startTime) / 1000);
+      const speed = loadedBytes / elapsed;
+      const pct = Math.min(84, 10 + Math.round((loadedBytes / totalBytes) * 74));
+      onProgress({
+        loadedBytes,
+        totalBytes,
+        percentage: pct,
+        speedFormatted: formatUploadSpeed(speed),
+        stage: 'downloading',
+        details: `Streaming authentic APK (${formatByteSize(loadedBytes)} / ${formatByteSize(totalBytes)})...`,
+      });
+    }
+  }
+
+  const blob = new Blob([assembled as unknown as BlobPart], {
+    type: 'application/vnd.android.package-archive',
+  });
+  const verification = await verifyApkBinary(
+    blob,
+    expectedSha256 || manifest.sha256,
+    expectedSizeBytes || totalBytes
+  );
+  if (!verification.valid) {
+    throw new Error(verification.error || 'Firestore binary failed integrity verification.');
+  }
+  return blob;
+}
+
+/**
+ * Resolves a direct native browser download URL (for instant click-to-download) when backed
+ * by the Express server or an external HTTPS CDN / Cloud Storage URL.
+ * Automatically triggers server-side Firestore rehydration if the file is missing on local container disk.
+ */
+export async function resolveImmediateDownloadUrl(
+  version: { id: string; downloadUrl?: string },
+  fileName: string,
+  signal?: AbortSignal
+): Promise<string | null> {
+  if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+    return null;
+  }
+
+  const rawUrl = (version.downloadUrl || '').trim();
+  if (/^https?:\/\//i.test(rawUrl)) {
+    return rawUrl;
+  }
+
+  const preferred = getApiBasePath();
+  const candidates = Array.from(
+    new Set([preferred, preferred === '/App-drop' ? '' : '/App-drop'])
+  );
+
+  for (const prefix of candidates) {
+    if (signal?.aborted) return null;
+    try {
+      const res = await fetch(
+        `${prefix}/api/apks/${encodeURIComponent(version.id)}/status?_t=${Date.now()}`,
+        {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal,
+        }
+      );
+      if (!res.ok) continue;
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (!ct.includes('application/json')) continue;
+      const data = await res.json().catch(() => null);
+      if (data?.exists === true) {
+        return buildDirectApkDownloadUrl(version.id, fileName, prefix);
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
+/**
  * Stores and verifies the original, complete APK binary blob in remote persistent storage:
- * - Dedicated Server storage endpoint (/App-drop/api/apks/upload) with SHA-256 + byte-size verification
+ * - Dedicated Server storage endpoint (2 MB chunked upload with SHA-256 + byte-size verification)
  * - Firebase Cloud Storage (published/${appId}/${versionId}/${fileName}) when bucket is provisioned
+ * - Firestore Durable Binary Store (/apkBinaries/${versionId}) for cross-container & static-host availability
  * - Caches locally in IndexedDB ('AppDropBinaryDB') and Cache Storage API ONLY after remote upload verifies
  */
 export async function saveApkBinary(
@@ -950,13 +1589,20 @@ export async function saveApkBinary(
     fileName?: string;
     sha256?: string;
     onProgress?: (progress: UploadProgressData) => void;
+    signal?: AbortSignal;
   }
 ): Promise<{
   cloudResult?: { downloadUrl: string; storagePath: string } | null;
   serverResult?: { downloadUrl: string; sizeBytes: number; sha256?: string } | null;
+  firestoreResult?: { versionId: string; chunkCount: number; totalBytes: number } | null;
   effectiveDownloadUrl: string;
   effectiveStoragePath: string;
 }> {
+  const signal = options?.signal;
+  if (signal?.aborted) {
+    throw makeAbortError();
+  }
+
   const totalSize = blob.size;
   const fileName = options?.fileName || (blob instanceof File ? blob.name : `${versionId}.apk`);
   const basePath = getApiBasePath();
@@ -965,46 +1611,118 @@ export async function saveApkBinary(
   let expectedSha = options?.sha256?.trim().toLowerCase() || '';
   if (!expectedSha || expectedSha.length !== 64) {
     const { calculateSha256 } = await import('./apkValidator');
-    expectedSha = await calculateSha256(blob);
+    expectedSha = await calculateSha256(blob, undefined, signal);
   }
 
-  // Upload to durable remote storage (Backend Server + Firebase Cloud Storage if provisioned)
+  if (signal?.aborted) {
+    throw makeAbortError();
+  }
+
+  // Upload to durable remote storage (Backend Server + Firebase Cloud Storage + Firestore Durable Mirror)
   let serverResult: { downloadUrl: string; sizeBytes: number; sha256?: string } | null = null;
   let cloudResult: { downloadUrl: string; storagePath: string } | null = null;
+  let firestoreResult: { versionId: string; chunkCount: number; totalBytes: number } | null = null;
+  let serverErrorReason = '';
+  let cloudErrorReason = '';
+  let firestoreErrorReason = '';
 
-  const [serverSettled, cloudSettled] = await Promise.allSettled([
+  let maxReportedPct = 0;
+  const emitMonotonicProgress = (prog: UploadProgressData, scaleMax: number = 100) => {
+    if (signal?.aborted || !options?.onProgress) return;
+    if (prog.loadedBytes <= 0) return;
+    const scaledPct = Math.min(scaleMax, Math.max(1, Math.round((prog.percentage / 100) * scaleMax)));
+    if (scaledPct < maxReportedPct) return;
+    maxReportedPct = scaledPct;
+    options.onProgress({
+      ...prog,
+      percentage: scaledPct,
+    });
+  };
+
+  const shouldMirrorFirestore = Boolean(
+    options?.appId && blob.size > 0 && blob.size <= FIRESTORE_BINARY_MAX_BYTES && typeof window !== 'undefined'
+  );
+
+  const [serverSettled, cloudSettled, firestoreSettled] = await Promise.allSettled([
     uploadApkToServer(
       versionId,
       blob,
       fileName,
-      (prog) => {
-        if (options?.onProgress) {
-          options.onProgress(prog);
-        }
-      },
+      (prog) => emitMonotonicProgress(prog, shouldMirrorFirestore ? 85 : 100),
       options?.appId,
-      expectedSha
+      expectedSha,
+      signal,
+      (reason) => {
+        serverErrorReason = reason;
+      }
     ),
     options?.appId
-      ? uploadApkToCloudStorage(options.appId, versionId, fileName, blob, (prog) => {
-          if (options?.onProgress) {
-            options.onProgress(prog);
+      ? uploadApkToCloudStorage(
+          options.appId,
+          versionId,
+          fileName,
+          blob,
+          (prog) => emitMonotonicProgress(prog, 100),
+          signal,
+          (reason) => {
+            cloudErrorReason = reason;
           }
-        })
+        )
+      : Promise.resolve(null),
+    shouldMirrorFirestore
+      ? uploadApkToFirestoreBinaries(
+          options!.appId!,
+          versionId,
+          fileName,
+          blob,
+          expectedSha,
+          (prog) => emitMonotonicProgress(prog, 100),
+          signal,
+          (reason) => {
+            firestoreErrorReason = reason;
+          }
+        )
       : Promise.resolve(null),
   ]);
 
+  if (
+    signal?.aborted ||
+    (serverSettled.status === 'rejected' && isAbortError(serverSettled.reason)) ||
+    (cloudSettled.status === 'rejected' && isAbortError(cloudSettled.reason)) ||
+    (firestoreSettled.status === 'rejected' && isAbortError(firestoreSettled.reason))
+  ) {
+    await deleteApkBinary(versionId, {
+      appId: options?.appId,
+      fileName,
+    }).catch(() => {});
+    throw makeAbortError('Upload cancelled by administrator.');
+  }
+
   if (serverSettled.status === 'fulfilled') {
     serverResult = serverSettled.value;
+  } else {
+    serverErrorReason = serverSettled.reason?.message || serverErrorReason || 'Server upload failed';
   }
   if (cloudSettled.status === 'fulfilled') {
     cloudResult = cloudSettled.value;
+  } else {
+    cloudErrorReason = cloudSettled.reason?.message || cloudErrorReason || 'Cloud Storage upload failed';
+  }
+  if (firestoreSettled.status === 'fulfilled') {
+    firestoreResult = firestoreSettled.value;
+  } else {
+    firestoreErrorReason =
+      firestoreSettled.reason?.message || firestoreErrorReason || 'Firestore mirror failed';
   }
 
   // Require at least one verified remote durable backend so users across devices can download the exact APK.
-  if (!cloudResult && !serverResult) {
+  if (!cloudResult && !serverResult && !firestoreResult) {
+    const detailParts: string[] = [];
+    if (serverErrorReason) detailParts.push(`Server: ${serverErrorReason}`);
+    if (cloudErrorReason) detailParts.push(`Cloud Storage: ${cloudErrorReason}`);
+    if (firestoreErrorReason) detailParts.push(`Firestore: ${firestoreErrorReason}`);
     throw new Error(
-      'Unable to upload APK binary to remote storage. Neither Firebase Cloud Storage nor the backend APK upload endpoint verified the package. Publishing aborted.'
+      `Unable to upload APK binary to remote storage (${detailParts.join(' | ') || 'no remote storage backend available'}). Publishing aborted.`
     );
   }
 
@@ -1051,6 +1769,7 @@ export async function saveApkBinary(
   return {
     cloudResult,
     serverResult,
+    firestoreResult,
     effectiveDownloadUrl,
     effectiveStoragePath,
   };
@@ -1375,6 +2094,28 @@ export async function getApkBinary(
     }
   } catch {}
 
+  // Tier 4: Retrieve from Firestore Durable Binary Store (/apkBinaries/{versionId})
+  try {
+    const firestoreBlob = await fetchApkFromFirestoreBinaries(
+      versionId,
+      expectedSha,
+      expectedSize,
+      options?.onProgress
+    );
+    if (firestoreBlob && firestoreBlob.size > 0) {
+      // Cache verified binary in IndexedDB for faster local re-downloads
+      try {
+        const database = await openDatabase();
+        const transaction = database.transaction(STORE_NAME, 'readwrite');
+        transaction.objectStore(STORE_NAME).put(firestoreBlob, versionId);
+        transaction.oncomplete = () => database.close();
+      } catch {}
+      return firestoreBlob;
+    }
+  } catch (fsErr: any) {
+    failureReasons.push(fsErr?.message || 'Failed retrieving binary from Firestore mirror');
+  }
+
   const detailSuffix = failureReasons.length > 0 ? ` Details: ${failureReasons[0]}` : '';
   // STRICT INVARIANT: If the exact verified APK cannot be retrieved, THROW AN ERROR.
   // Under NO circumstances do we fall back to a template or synthetic APK!
@@ -1652,20 +2393,24 @@ export async function purgeAllStoredFiles(): Promise<{
     }
   } catch {}
 
-  // 5. Purge from legacy Firestore chunks if any remain
+  // 5. Purge from Firestore durable /apkBinaries & legacy /apkChunks
   try {
     const fsContext = await getFirestoreContext();
     if (fsContext && fsContext.db) {
       const { db, collection, getDocs, deleteDoc } = fsContext;
-      const chunksSnap = await getDocs(collection(db, 'apkChunks'));
-      for (const docSnap of chunksSnap.docs) {
-        const subSnap = await getDocs(collection(db, 'apkChunks', docSnap.id, 'chunks')).catch(() => null);
-        if (subSnap) {
-          for (const subDoc of subSnap.docs) {
-            await deleteDoc(subDoc.ref).catch(() => {});
+      for (const colName of ['apkBinaries', 'apkChunks']) {
+        const docsSnap = await getDocs(collection(db, colName)).catch(() => null);
+        if (docsSnap) {
+          for (const docSnap of docsSnap.docs) {
+            const subSnap = await getDocs(collection(db, colName, docSnap.id, 'chunks')).catch(() => null);
+            if (subSnap) {
+              for (const subDoc of subSnap.docs) {
+                await deleteDoc(subDoc.ref).catch(() => {});
+              }
+            }
+            await deleteDoc(docSnap.ref).catch(() => {});
           }
         }
-        await deleteDoc(docSnap.ref).catch(() => {});
       }
     }
   } catch {}
@@ -1674,7 +2419,7 @@ export async function purgeAllStoredFiles(): Promise<{
 }
 
 /**
- * Deletes stored binary blobs, server files, and legacy Firestore chunks when an app or version is deleted.
+ * Deletes stored binary blobs, server files, and Firestore binary chunks when an app or version is deleted.
  */
 export async function deleteApkBinary(
   versionId: string,
@@ -1696,6 +2441,9 @@ export async function deleteApkBinary(
   try {
     if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
       await fetch(`${basePath}/api/apks/${encodeURIComponent(versionId)}`, { method: 'DELETE' }).catch(() => {});
+      if (basePath) {
+        await fetch(`/api/apks/${encodeURIComponent(versionId)}`, { method: 'DELETE' }).catch(() => {});
+      }
     }
   } catch {}
 
@@ -1723,7 +2471,8 @@ export async function deleteApkBinary(
     }
   } catch {}
 
-  // 5. Delete from legacy Firestore chunks if any exist
+  // 5. Delete from Firestore durable /apkBinaries & legacy /apkChunks
+  await deleteApkBinaryFromFirestoreBinaries(versionId);
   try {
     const fsContext = await getFirestoreContext();
     if (fsContext && fsContext.db) {

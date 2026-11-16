@@ -80,6 +80,41 @@ service cloud.firestore {
       allow delete: if isAdmin() || isValidId(versionId);
     }
 
+    function isValidApkBinaryManifest(data) {
+      return data.keys().hasAll(['versionId', 'appId', 'fileName', 'totalBytes', 'sha256', 'chunkCount', 'chunkSize', 'uploadedAt']) &&
+             data.keys().hasOnly(['versionId', 'appId', 'fileName', 'totalBytes', 'sha256', 'chunkCount', 'chunkSize', 'uploadedAt']) &&
+             data.versionId is string && data.versionId.size() > 0 && data.versionId.size() <= 128 &&
+             data.appId is string && data.appId.size() > 0 && data.appId.size() <= 128 &&
+             data.fileName is string && data.fileName.size() > 0 && data.fileName.size() <= 255 &&
+             data.totalBytes is number && data.totalBytes > 0 && data.totalBytes <= 104857600 &&
+             data.sha256 is string && data.sha256.size() == 64 &&
+             data.chunkCount is int && data.chunkCount > 0 && data.chunkCount <= 250 &&
+             data.chunkSize is int && data.chunkSize > 0 && data.chunkSize <= 700000 &&
+             data.uploadedAt is string && data.uploadedAt.size() <= 64;
+    }
+
+    function isValidApkBinaryChunk(data) {
+      return data.keys().hasAll(['index', 'offset', 'byteLength', 'data']) &&
+             data.keys().hasOnly(['index', 'offset', 'byteLength', 'data']) &&
+             data.index is int && data.index >= 0 && data.index < 250 &&
+             data.offset is number && data.offset >= 0 &&
+             data.byteLength is int && data.byteLength > 0 && data.byteLength <= 700000 &&
+             data.data is string && data.data.size() > 0 && data.data.size() <= 960000;
+    }
+
+    // Durable binary manifests & chunks for live cross-deployment APK downloads
+    match /apkBinaries/{versionId} {
+      allow read: if isValidId(versionId);
+      allow create, update: if (isAdmin() || isValidApkBinaryManifest(incoming())) && isValidId(versionId) && isValidApkBinaryManifest(incoming());
+      allow delete: if isAdmin() || isValidId(versionId);
+
+      match /chunks/{chunkId} {
+        allow read: if isValidId(versionId) && isValidId(chunkId);
+        allow create, update: if (isAdmin() || isValidApkBinaryChunk(incoming())) && isValidId(versionId) && isValidId(chunkId) && isValidApkBinaryChunk(incoming());
+        allow delete: if isAdmin() || (isValidId(versionId) && isValidId(chunkId));
+      }
+    }
+
     // Legacy binary chunks deprecated per user instruction; allow cleanup read and delete
     match /apkChunks/{versionId} {
       allow read, delete: if true;

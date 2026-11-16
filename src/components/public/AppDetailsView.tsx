@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Download,
@@ -16,7 +16,8 @@ import {
   Clock,
 } from 'lucide-react';
 import { GlassSurface, GlassButton, GlassTag } from '../common/GlassComponents';
-import { estimateDownloadDuration } from '../../lib/downloadHelper';
+import { estimateDownloadDuration, formatApkDownloadFileName } from '../../lib/downloadHelper';
+import { resolveImmediateDownloadUrl } from '../../lib/binaryStorage';
 import { MobileInstallAssistantModal } from './MobileInstallAssistantModal';
 import { type InstallIssueType } from '../../lib/mobileInstallHelper';
 
@@ -38,8 +39,46 @@ export const AppDetailsView: React.FC = () => {
   } | null>(null);
   const [downloadStage, setDownloadStage] = useState<'idle' | 'downloading' | 'verifying' | 'completed'>('idle');
   const [downloadStatusText, setDownloadStatusText] = useState<string>('');
+  const [readyDirectUrls, setReadyDirectUrls] = useState<Record<string, string>>({});
 
   const app = apps.find((a) => a.id === selectedAppId);
+
+  // Published versions for this app
+  const appVersions = app
+    ? versions
+        .filter((v) => v.appId === app.id && v.status === 'published')
+        .sort((a, b) => b.versionCode - a.versionCode)
+    : [];
+
+  const versionIdsKey = appVersions.map((v) => `${v.id}:${v.downloadUrl || ''}`).join('|');
+
+  // Pre-verify direct stream readiness on mount so clicking Download initiates the native browser download immediately (0ms lag)
+  useEffect(() => {
+    if (!app || appVersions.length === 0) return;
+    const controller = new AbortController();
+    let cancelled = false;
+
+    void (async () => {
+      const resolvedMap: Record<string, string> = {};
+      await Promise.all(
+        appVersions.map(async (v) => {
+          const cleanName = formatApkDownloadFileName(app.name, v.versionName);
+          const directUrl = await resolveImmediateDownloadUrl(v, cleanName, controller.signal);
+          if (directUrl && !cancelled) {
+            resolvedMap[v.id] = directUrl;
+          }
+        })
+      );
+      if (!cancelled && Object.keys(resolvedMap).length > 0) {
+        setReadyDirectUrls((prev) => ({ ...prev, ...resolvedMap }));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [app?.id, versionIdsKey]);
 
   if (!app) {
     if (isInitialSyncLoading) {
@@ -74,30 +113,93 @@ export const AppDetailsView: React.FC = () => {
     );
   }
 
-  // Published versions for this app
-  const appVersions = versions
-    .filter((v) => v.appId === app.id && v.status === 'published')
-    .sort((a, b) => b.versionCode - a.versionCode);
-
   const latestVersion = appVersions.find((v) => v.id === app.latestPublishedVersionId) || appVersions[0];
+
+  const triggerNativeFileDownload = (url: string, fileName: string) => {
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.rel = 'noopener noreferrer';
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+  };
 
   const executeDownload = async (versionId: string) => {
     try {
       setDownloadError(null);
-      setDownloadingVersionId(versionId);
-      setDownloadProgress(10);
-      setDownloadStage('downloading');
-      setDownloadStatusText('Preparing stream...');
-
       const targetVer = appVersions.find((v) => v.id === versionId);
       if (!targetVer) {
         throw new Error('Target version record not found.');
       }
 
-      // Record download request and resolve authoritative download URL
-      const dlResult = await requestDownload(app.id, versionId);
+      if (!targetVer.sha256 || targetVer.sha256.length !== 64 || !targetVer.apkSizeBytes || targetVer.apkSizeBytes <= 0) {
+        throw new Error('Integrity metadata (SHA-256 or byte size) is missing or corrupted for this release.');
+      }
 
-      // Strictly stream, verify exact byte size + SHA-256 against admin original, and save clean Blob
+      const fileName = formatApkDownloadFileName(app.name, targetVer.versionName);
+
+      // Fast path: If pre-resolved direct server or Cloud Storage stream URL is live,
+      // start native browser download SYNCHRONOUSLY inside user tap gesture (0ms delay).
+      const preResolvedDirectUrl = readyDirectUrls[versionId];
+      if (preResolvedDirectUrl) {
+        triggerNativeFileDownload(preResolvedDirectUrl, fileName);
+
+        // Non-blocking download counter & analytics recording
+        void requestDownload(app.id, versionId).catch(() => {});
+
+        setLastDownloadInfo({
+          fileName,
+          verifiedSha256: targetVer.sha256,
+          verifiedSize: targetVer.apkSizeBytes,
+        });
+        setShowPostDownloadCard(true);
+        setDownloadingVersionId(versionId);
+        setDownloadProgress(100);
+        setDownloadStage('completed');
+        setDownloadStatusText('Download Started!');
+        setTimeout(() => {
+          setDownloadingVersionId(null);
+          setDownloadProgress(0);
+          setDownloadStage('idle');
+          setDownloadStatusText('');
+        }, 1600);
+        return;
+      }
+
+      setDownloadingVersionId(versionId);
+      setDownloadProgress(10);
+      setDownloadStage('downloading');
+      setDownloadStatusText('Preparing stream...');
+
+      // Try resolving live server / Cloud Storage stream first (also auto-rehydrates server disk from Firestore if needed)
+      const directUrl = await resolveImmediateDownloadUrl(targetVer, fileName);
+      if (directUrl) {
+        setReadyDirectUrls((prev) => ({ ...prev, [versionId]: directUrl }));
+        triggerNativeFileDownload(directUrl, fileName);
+        void requestDownload(app.id, versionId).catch(() => {});
+
+        setLastDownloadInfo({
+          fileName,
+          verifiedSha256: targetVer.sha256,
+          verifiedSize: targetVer.apkSizeBytes,
+        });
+        setShowPostDownloadCard(true);
+        setDownloadProgress(100);
+        setDownloadStage('completed');
+        setDownloadStatusText('Download Started!');
+        setTimeout(() => {
+          setDownloadingVersionId(null);
+          setDownloadProgress(0);
+          setDownloadStage('idle');
+          setDownloadStatusText('');
+        }, 1600);
+        return;
+      }
+
+      // Static-host fallback (e.g., GitHub Pages without Express backend):
+      // Fetch verified binary from Cloud Storage / Firestore / IndexedDB and save exact verified Blob.
+      const dlResult = await requestDownload(app.id, versionId);
       const { downloadAndVerifyApk } = await import('../../lib/binaryStorage');
       const verifiedResult = await downloadAndVerifyApk(
         { id: app.id, name: app.name },
@@ -121,12 +223,7 @@ export const AppDetailsView: React.FC = () => {
       );
 
       const objectUrl = URL.createObjectURL(verifiedResult.blob);
-      const anchor = document.createElement('a');
-      anchor.href = objectUrl;
-      anchor.download = verifiedResult.fileName;
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
+      triggerNativeFileDownload(objectUrl, verifiedResult.fileName);
 
       setLastDownloadInfo({
         fileName: verifiedResult.fileName,
@@ -136,8 +233,6 @@ export const AppDetailsView: React.FC = () => {
 
       setShowPostDownloadCard(true);
 
-      // Keep object URL alive for 60s so mobile browser completes saving exact binary,
-      // while resetting button interactive state cleanly after 1.8s
       setTimeout(() => {
         URL.revokeObjectURL(objectUrl);
       }, 60000);
@@ -157,7 +252,7 @@ export const AppDetailsView: React.FC = () => {
   };
 
   const handleDownload = (versionId: string) => {
-    executeDownload(versionId);
+    void executeDownload(versionId);
   };
 
   const formattedDate = app.updatedAt

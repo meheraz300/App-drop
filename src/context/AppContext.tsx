@@ -3,7 +3,7 @@
  * theme management, and admin operations.
  */
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import type {
   AppRecord,
   VersionRecord,
@@ -55,6 +55,7 @@ import {
   purgeAllStoredFiles,
   getApiBasePath,
   isCloudStorageBucketAvailable,
+  isAbortError,
 } from '../lib/binaryStorage';
 import {
   recordDownloadEvent,
@@ -155,7 +156,10 @@ interface AppContextType {
       externalDownloadUrl?: string;
     }
   ) => Promise<boolean>;
+  cancelApkUpload: () => void;
   resetUploadProgress: () => void;
+  uploadCancelledNotice: string | null;
+  clearUploadCancelledNotice: () => void;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -310,6 +314,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isInitialSyncLoading, setIsInitialSyncLoading] = useState(true);
 
   // Upload workflow state
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  const activeUploadVersionRef = useRef<string | null>(null);
+  const [uploadCancelledNotice, setUploadCancelledNotice] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<{
     stage: 'idle' | 'uploading' | 'validating' | 'publishing' | 'completed' | 'error';
     percentage: number;
@@ -1071,8 +1078,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  const clearUploadCancelledNotice = () => {
+    setUploadCancelledNotice(null);
+  };
+
   const resetUploadProgress = () => {
     setUploadProgress({ stage: 'idle', percentage: 0 });
+  };
+
+  const cancelApkUpload = () => {
+    const controller = uploadAbortRef.current;
+    const partialVersionId = activeUploadVersionRef.current;
+    uploadAbortRef.current = null;
+    activeUploadVersionRef.current = null;
+
+    if (controller) {
+      controller.abort();
+    }
+
+    setUploadProgress({ stage: 'idle', percentage: 0 });
+    setUploadCancelledNotice(
+      'Upload cancelled — no partial package was published. You can select another APK file.'
+    );
+
+    if (partialVersionId) {
+      const basePath = getApiBasePath();
+      void fetch(`${basePath}/api/apks/upload/${encodeURIComponent(partialVersionId)}`, {
+        method: 'DELETE',
+      }).catch(() => {});
+      if (basePath) {
+        void fetch(`/api/apks/upload/${encodeURIComponent(partialVersionId)}`, {
+          method: 'DELETE',
+        }).catch(() => {});
+      }
+      void deleteApkBinary(partialVersionId).catch(() => {});
+    }
   };
 
   const purgeAllStorage = async () => {
@@ -1158,6 +1198,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       releaseNotes = arg3 || '';
     }
 
+    if (uploadAbortRef.current) {
+      uploadAbortRef.current.abort();
+    }
+    const abortController = new AbortController();
+    uploadAbortRef.current = abortController;
+    const signal = abortController.signal;
+    setUploadCancelledNotice(null);
+
     try {
       // Step 1: Validating APK package
       setUploadProgress({
@@ -1166,14 +1214,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         details: `Reading & verifying ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)...`,
       });
 
-      const metadata = await inspectApkFile(file, file.name, undefined, (hashPct) => {
-        setUploadProgress((prev) => ({
-          ...prev,
-          stage: 'validating',
-          percentage: Math.min(24, 15 + Math.round((hashPct / 100) * 9)),
-          details: `Inspecting & hashing ${file.name} (${hashPct}%)...`,
-        }));
-      });
+      const metadata = await inspectApkFile(
+        file,
+        file.name,
+        undefined,
+        (hashPct) => {
+          if (signal.aborted) return;
+          setUploadProgress((prev) => ({
+            ...prev,
+            stage: 'validating',
+            percentage: Math.min(24, 15 + Math.round((hashPct / 100) * 9)),
+            details: `Inspecting & hashing ${file.name} (${hashPct}%)...`,
+          }));
+        },
+        signal
+      );
+
+      if (signal.aborted) {
+        return false;
+      }
 
       setUploadProgress({
         stage: 'validating',
@@ -1267,22 +1326,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return false;
       }
 
+      if (signal.aborted) {
+        return false;
+      }
+
+      const newVersionId = `ver_${targetAppId}_${Date.now()}`;
+      activeUploadVersionRef.current = newVersionId;
+
       // Step 3: Uploading & Storing stage
       setUploadProgress({
         stage: 'uploading',
-        percentage: 30,
-        details: `Streaming ${file.name} to storage...`,
+        percentage: 28,
+        details: `Connecting & preparing ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)...`,
         verifiedMetadata: metadata,
+        speedFormatted: 'Starting...',
+        etaFormatted: 'Estimating...',
+        transferredFormatted: `0 B / ${(file.size / (1024 * 1024)).toFixed(2)} MB`,
       });
-
-      const newVersionId = `ver_${targetAppId}_${Date.now()}`;
 
       // Persist the exact original binary blob in remote storage (Cloud Storage / server storage) and verify byte/SHA match
       const saveResult = await saveApkBinary(newVersionId, file, {
         appId: targetAppId,
         fileName: file.name,
         sha256: metadata.sha256,
+        signal,
         onProgress: (prog) => {
+          if (signal.aborted) return;
           const mappedPct = Math.min(92, 30 + Math.round((prog.percentage || 0) * 0.62));
           setUploadProgress((prev) => ({
             ...prev,
@@ -1296,7 +1365,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         },
       });
 
-      if (!saveResult || (!saveResult.cloudResult && !saveResult.serverResult)) {
+      if (signal.aborted) {
+        await deleteApkBinary(newVersionId, {
+          appId: targetAppId,
+          fileName: file.name,
+        }).catch(() => {});
+        return false;
+      }
+
+      if (!saveResult || (!saveResult.cloudResult && !saveResult.serverResult && !saveResult.firestoreResult)) {
         throw new Error('Upload failed: Unable to verify intact binary in remote storage. Publishing cancelled.');
       }
 
@@ -1345,6 +1422,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         latestPublishedVersionId: newVersionId,
         updatedAt: now,
       };
+
+      if (signal.aborted) {
+        await deleteApkBinary(newVersionId, {
+          appId: targetAppId,
+          fileName: file.name,
+          apkPath: effectiveApkPath,
+        }).catch(() => {});
+        return false;
+      }
 
       // Real-time synchronization to Firestore BEFORE committing local pointer
       try {
@@ -1423,12 +1509,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       return true;
     } catch (err: any) {
+      if (isAbortError(err) || signal.aborted) {
+        setUploadProgress({ stage: 'idle', percentage: 0 });
+        setUploadCancelledNotice(
+          'Upload cancelled — no partial package was published. You can select another APK file.'
+        );
+        return false;
+      }
       setUploadProgress({
         stage: 'error',
         percentage: 0,
         error: err.message || 'An unexpected error occurred during APK validation.',
       });
       return false;
+    } finally {
+      if (uploadAbortRef.current === abortController) {
+        uploadAbortRef.current = null;
+        activeUploadVersionRef.current = null;
+      }
     }
   };
 
@@ -1474,7 +1572,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         uploadProgress,
         startApkUpload,
+        cancelApkUpload,
         resetUploadProgress,
+        uploadCancelledNotice,
+        clearUploadCancelledNotice,
       }}
     >
       {children}

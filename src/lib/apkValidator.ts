@@ -209,6 +209,15 @@ export class Sha256Incremental {
   }
 }
 
+export function createAbortError(message = 'Operation aborted by administrator.'): Error {
+  if (typeof DOMException !== 'undefined') {
+    return new DOMException(message, 'AbortError');
+  }
+  const err = new Error(message);
+  err.name = 'AbortError';
+  return err;
+}
+
 /**
  * Calculates SHA-256 hash of an ArrayBuffer, Uint8Array, Blob, or File in browser or Node environments.
  * Uses hardware-accelerated WebCrypto where available, streams large Blobs in chunks to avoid memory exhaustion,
@@ -216,8 +225,13 @@ export class Sha256Incremental {
  */
 export async function calculateSha256(
   input: ArrayBuffer | Uint8Array | Blob | File,
-  onProgress?: (progressPct: number) => void
+  onProgress?: (progressPct: number) => void,
+  signal?: AbortSignal
 ): Promise<string> {
+  if (signal?.aborted) {
+    throw createAbortError('APK checksum calculation cancelled.');
+  }
+
   // If input is Blob/File:
   if (typeof Blob !== 'undefined' && input instanceof Blob) {
     const size = input.size;
@@ -225,7 +239,9 @@ export async function calculateSha256(
     // Small Blobs (< 16 MB) with Web Crypto: fast path
     if (size <= 16 * 1024 * 1024 && typeof crypto !== 'undefined' && crypto.subtle && crypto.subtle.digest) {
       const buf = await input.arrayBuffer();
+      if (signal?.aborted) throw createAbortError('APK checksum calculation cancelled.');
       const hashBuffer = await crypto.subtle.digest('SHA-256', buf);
+      if (signal?.aborted) throw createAbortError('APK checksum calculation cancelled.');
       const hashArray = Array.from(new Uint8Array(hashBuffer));
       if (onProgress) onProgress(100);
       return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -240,14 +256,18 @@ export async function calculateSha256(
         const chunkSize = 2 * 1024 * 1024; // 2 MB chunks
         let offset = 0;
         while (offset < size) {
+          if (signal?.aborted) throw createAbortError('APK checksum calculation cancelled.');
           const chunk = input.slice(offset, Math.min(offset + chunkSize, size));
           const chunkBuf = await chunk.arrayBuffer();
+          if (signal?.aborted) throw createAbortError('APK checksum calculation cancelled.');
           hash.update(Buffer.from(chunkBuf));
           offset += chunkSize;
           if (onProgress) onProgress(Math.min(100, Math.round((offset / size) * 100)));
         }
         return hash.digest('hex');
-      } catch {}
+      } catch (err: any) {
+        if (err?.name === 'AbortError') throw err;
+      }
     }
 
     // Browser incremental streaming path for large Blobs (up to 500 MB)
@@ -255,11 +275,17 @@ export async function calculateSha256(
     const chunkSize = 2 * 1024 * 1024; // 2 MB chunks
     let offset = 0;
     while (offset < size) {
+      if (signal?.aborted) throw createAbortError('APK checksum calculation cancelled.');
       const slice = input.slice(offset, Math.min(offset + chunkSize, size));
       const chunkBuf = await slice.arrayBuffer();
+      if (signal?.aborted) throw createAbortError('APK checksum calculation cancelled.');
       hasher.update(new Uint8Array(chunkBuf));
       offset += chunkSize;
       if (onProgress) onProgress(Math.min(100, Math.round((offset / size) * 100)));
+      // Yield briefly to keep UI responsive (e.g. Cancel Upload button clicks) on huge APKs
+      if (typeof window !== 'undefined' && offset < size) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
     }
     return hasher.digest();
   }
@@ -688,14 +714,24 @@ export async function inspectApkFile(
   file: Blob,
   fileName: string,
   targetPackageName?: string,
-  onHashProgress?: (progressPct: number) => void
+  onHashProgress?: (progressPct: number) => void,
+  signal?: AbortSignal
 ): Promise<ParsedApkMetadata> {
+  if (signal?.aborted) {
+    throw createAbortError('APK inspection cancelled.');
+  }
   const headBuf = await file.slice(0, 4).arrayBuffer();
+  if (signal?.aborted) {
+    throw createAbortError('APK inspection cancelled.');
+  }
   const isValidZip = isZipArchive(headBuf);
   const [sha256, manifestMeta] = await Promise.all([
-    calculateSha256(file, onHashProgress),
+    calculateSha256(file, onHashProgress, signal),
     isValidZip ? extractManifestMetadataFromFile(file) : Promise.resolve(null),
   ]);
+  if (signal?.aborted) {
+    throw createAbortError('APK inspection cancelled.');
+  }
   return buildParsedMetadata(file.size, isValidZip, sha256, manifestMeta, fileName, targetPackageName);
 }
 

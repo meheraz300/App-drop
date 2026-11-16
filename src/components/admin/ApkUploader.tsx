@@ -7,12 +7,12 @@ import {
   CheckCircle2,
   AlertCircle,
   X,
+  XCircle,
   RotateCcw,
   Copy,
   Check,
   ArrowRight,
   Download,
-  FolderPlus,
   Layers,
   Sparkles,
   Zap,
@@ -40,7 +40,10 @@ export const ApkUploader: React.FC = () => {
     systemConfig,
     uploadProgress,
     startApkUpload,
+    cancelApkUpload,
     resetUploadProgress,
+    uploadCancelledNotice,
+    clearUploadCancelledNotice,
     navigateTo,
   } = useApp();
 
@@ -64,6 +67,7 @@ export const ApkUploader: React.FC = () => {
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pipelineRef = useRef<HTMLDivElement>(null);
 
   const targetApp = apps.find((a) => a.id === targetAppId);
   const maxMb = (systemConfig.maxUploadSizeBytes / (1024 * 1024)).toFixed(0);
@@ -110,6 +114,7 @@ export const ApkUploader: React.FC = () => {
 
   const handleFileSelected = (file: File) => {
     resetUploadProgress();
+    clearUploadCancelledNotice();
     setDownloadNotice(null);
 
     const isApk =
@@ -134,9 +139,39 @@ export const ApkUploader: React.FC = () => {
     }
   };
 
+  const handleClearSelectedFile = () => {
+    resetUploadProgress();
+    clearUploadCancelledNotice();
+    setSelectedFile(null);
+    setAppTitle('');
+    setDownloadNotice(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleCancelActiveUpload = () => {
+    cancelApkUpload();
+    setSelectedFile(null);
+    setAppTitle('');
+    setDownloadNotice(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const isUploadActive =
+    uploadProgress.stage === 'validating' ||
+    uploadProgress.stage === 'uploading' ||
+    uploadProgress.stage === 'publishing';
+
   const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedFile) return;
+
+    setTimeout(() => {
+      pipelineRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 80);
 
     const chosenAppId = uploadMode === 'existing' && targetAppId ? targetAppId : '';
     await startApkUpload(selectedFile, releaseNotes, chosenAppId, {
@@ -347,16 +382,44 @@ export const ApkUploader: React.FC = () => {
                       </span>
                       <span>({selectedFile.size.toLocaleString()} bytes preserved)</span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        fileInputRef.current?.click();
-                      }}
-                      className="mt-1 text-xs text-blue-600 dark:text-blue-400 font-medium hover:underline inline-block"
-                    >
-                      Change selected file
-                    </button>
+                    <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+                      <button
+                        type="button"
+                        disabled={isUploadActive}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          fileInputRef.current?.click();
+                        }}
+                        className="text-xs text-blue-600 dark:text-blue-400 font-medium hover:underline inline-block cursor-pointer disabled:opacity-50"
+                      >
+                        Change selected file
+                      </button>
+                      {!isUploadActive ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleClearSelectedFile();
+                          }}
+                          className="inline-flex items-center gap-1 text-xs text-red-600 dark:text-red-400 font-medium hover:underline cursor-pointer"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                          <span>Cancel / Clear</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCancelActiveUpload();
+                          }}
+                          className="inline-flex items-center gap-1 text-xs text-red-600 dark:text-red-400 font-semibold hover:underline cursor-pointer"
+                        >
+                          <XCircle className="h-3.5 w-3.5" />
+                          <span>Cancel active upload</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <div className="space-y-1.5">
@@ -479,29 +542,62 @@ export const ApkUploader: React.FC = () => {
             />
           </div>
 
+          {/* Cancelled Notice Banner */}
+          {uploadCancelledNotice && uploadProgress.stage === 'idle' && (
+            <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 text-xs">
+              <div className="flex items-center gap-2">
+                <XCircle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <span>{uploadCancelledNotice}</span>
+              </div>
+              <button
+                type="button"
+                onClick={clearUploadCancelledNotice}
+                aria-label="Dismiss cancel notice"
+                className="p-1 rounded-lg hover:bg-amber-200/50 dark:hover:bg-amber-900/40 transition-colors cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
           {/* Actions & Upload Button */}
           {uploadProgress.stage === 'idle' && (
-            <div className="flex items-center justify-between pt-2">
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
               <span className="text-xs text-neutral-500">
                 {selectedFile ? 'Ready to upload & publish' : 'Select an APK package above to begin'}
               </span>
-              <button
-                type="submit"
-                disabled={!selectedFile}
-                className="inline-flex items-center gap-2 px-6 py-2.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <ShieldCheck className="h-4 w-4" />
-                <span>Upload, Validate & Publish</span>
-              </button>
+              <div className="flex items-center gap-2.5 ml-auto">
+                {selectedFile && (
+                  <button
+                    type="button"
+                    onClick={handleClearSelectedFile}
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-neutral-700 dark:text-neutral-200 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 border border-neutral-200 dark:border-neutral-700 rounded-xl transition-colors cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    <span>Cancel</span>
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={!selectedFile}
+                  className="inline-flex items-center gap-2 px-6 py-2.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <ShieldCheck className="h-4 w-4" />
+                  <span>Upload, Validate & Publish</span>
+                </button>
+              </div>
             </div>
           )}
         </form>
 
         {/* Progress Pipeline & Validation State Machine */}
         {uploadProgress.stage !== 'idle' && (
-          <div className="p-5 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800/40 space-y-4 text-xs">
-            {/* Header Stage & Percentage */}
-            <div className="flex items-center justify-between">
+          <div
+            ref={pipelineRef}
+            className="p-5 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800/40 space-y-4 text-xs"
+          >
+            {/* Header Stage, Cancel Button & Percentage */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <span className="font-bold text-neutral-900 dark:text-white uppercase tracking-wider text-[11px]">
                   Pipeline Status: <span className="capitalize">{uploadProgress.stage}</span>
@@ -522,9 +618,21 @@ export const ApkUploader: React.FC = () => {
                   </span>
                 )}
               </div>
-              <span className="font-mono tabular-nums text-sm font-bold text-neutral-900 dark:text-white">
-                {uploadProgress.percentage}%
-              </span>
+              <div className="flex items-center gap-3">
+                {isUploadActive && (
+                  <button
+                    type="button"
+                    onClick={handleCancelActiveUpload}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-red-100 hover:bg-red-200 dark:bg-red-950/70 dark:hover:bg-red-900/80 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/70 font-semibold text-[11px] transition-colors cursor-pointer"
+                  >
+                    <XCircle className="h-3.5 w-3.5" />
+                    <span>Cancel Upload</span>
+                  </button>
+                )}
+                <span className="font-mono tabular-nums text-sm font-bold text-neutral-900 dark:text-white">
+                  {uploadProgress.percentage}%
+                </span>
+              </div>
             </div>
 
             {/* Progress Bar */}
@@ -607,14 +715,23 @@ export const ApkUploader: React.FC = () => {
                   <AlertCircle className="h-4 w-4 shrink-0" />
                   <span>Validation Error</span>
                 </div>
-                <p className="text-[11px] leading-relaxed">{uploadProgress.error}</p>
-                <div className="pt-2">
+                <p className="text-[11px] leading-relaxed break-words">{uploadProgress.error}</p>
+                <div className="flex flex-wrap items-center gap-2 pt-2">
                   <button
+                    type="button"
                     onClick={resetUploadProgress}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-100 dark:bg-red-900/60 text-red-800 dark:text-red-200 font-medium hover:bg-red-200 transition-colors cursor-pointer"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
                     <span>Retry with adjusted package</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearSelectedFile}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/80 dark:bg-neutral-900/70 text-neutral-700 dark:text-neutral-200 border border-red-200 dark:border-red-800/60 font-medium hover:bg-white dark:hover:bg-neutral-800 transition-colors cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    <span>Cancel & Clear</span>
                   </button>
                 </div>
               </div>

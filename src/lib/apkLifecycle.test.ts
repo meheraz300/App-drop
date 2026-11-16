@@ -338,3 +338,122 @@ test('Scenario 26: HTML/JSON response masquerading as .apk fails binary APK vali
   assert.equal(check.valid, false);
 });
 
+test('Scenario 27: calculateSha256 and inspectApkFile abort cleanly via AbortSignal', async () => {
+  const { inspectApkFile } = await import('./apkValidator');
+  const { isAbortError } = await import('./binaryStorage');
+  const apkBlob = generateIntactApkBlob('Cancel Test', '1.0.0', 2 * 1024 * 1024, 'com.cancel.test');
+
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    async () => {
+      await calculateSha256(apkBlob, undefined, controller.signal);
+    },
+    (err: unknown) => isAbortError(err)
+  );
+
+  await assert.rejects(
+    async () => {
+      await inspectApkFile(apkBlob, 'cancel.apk', undefined, undefined, controller.signal);
+    },
+    (err: unknown) => isAbortError(err)
+  );
+});
+
+test('Scenario 28: saveApkBinary aborts immediately with AbortError without publishing partial packages', async () => {
+  const { saveApkBinary, isAbortError } = await import('./binaryStorage');
+  const apkBlob = generateIntactApkBlob('Abort Save', '1.0.0', 1024 * 1024, 'com.abort.save');
+
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    async () => {
+      await saveApkBinary('ver_abort_test_1', apkBlob, {
+        appId: 'app_abort_1',
+        fileName: 'abort.apk',
+        signal: controller.signal,
+      });
+    },
+    (err: unknown) => isAbortError(err)
+  );
+});
+
+test('Scenario 29: probeServerUploadEndpoint fails fast without hanging when backend is unavailable', async () => {
+  const { probeServerUploadEndpoint } = await import('./binaryStorage');
+  const start = Date.now();
+  const result = await probeServerUploadEndpoint('/App-drop');
+  const elapsed = Date.now() - start;
+
+  assert.equal(typeof result.available, 'boolean');
+  assert.ok(elapsed < 4000, `Probe must settle quickly (<4s), took ${elapsed}ms`);
+});
+
+test('Scenario 30: planBinaryChunks & base64 chunk reassembly preserve exact bytes and SHA-256 across non-aligned sizes', async () => {
+  const { planBinaryChunks, bufferToBase64, base64ToUint8Array } = await import('./binaryStorage');
+  const nonAlignedSize = 1500 * 1024 + 317; // 1.5 MB + 317 odd bytes
+  const originalBlob = generateIntactApkBlob('LiveApp', '2.1.0', nonAlignedSize, 'com.live.app');
+  const originalSha = await calculateSha256(originalBlob);
+  const originalBytes = new Uint8Array(await originalBlob.arrayBuffer());
+
+  const chunkSize = 600 * 1024;
+  const plan = planBinaryChunks(originalBytes.byteLength, chunkSize);
+  assert.equal(plan.chunkCount, 3);
+  assert.equal(plan.totalBytes, nonAlignedSize);
+  assert.equal(plan.ranges[0].byteLength, chunkSize);
+  assert.equal(plan.ranges[1].byteLength, chunkSize);
+  assert.equal(plan.ranges[2].byteLength, nonAlignedSize - 2 * chunkSize);
+
+  // Simulate Firestore base64 chunk storage & unordered reassembly by offset
+  const encodedChunks = plan.ranges.map((r) => ({
+    offset: r.offset,
+    data: bufferToBase64(originalBytes.subarray(r.offset, r.end)),
+  }));
+
+  const reassembled = new Uint8Array(plan.totalBytes);
+  for (const chunk of [...encodedChunks].reverse()) {
+    reassembled.set(base64ToUint8Array(chunk.data), chunk.offset);
+  }
+
+  const reassembledBlob = new Blob([reassembled], { type: 'application/vnd.android.package-archive' });
+  const check = await verifyApkBinary(reassembledBlob, originalSha, nonAlignedSize);
+  assert.equal(check.valid, true);
+  assert.equal(check.actualSize, nonAlignedSize);
+  assert.equal(check.actualSha256, originalSha);
+});
+
+test('Scenario 31: Reassembled chunk corruption or truncation is rejected by verifyApkBinary', async () => {
+  const { planBinaryChunks, bufferToBase64, base64ToUint8Array } = await import('./binaryStorage');
+  const targetSize = 700 * 1024 + 123;
+  const originalBlob = generateIntactApkBlob('IntegrityApp', '1.0.0', targetSize, 'com.integrity.app');
+  const originalSha = await calculateSha256(originalBlob);
+  const originalBytes = new Uint8Array(await originalBlob.arrayBuffer());
+
+  const plan = planBinaryChunks(originalBytes.byteLength, 300 * 1024);
+  const reassembled = new Uint8Array(plan.totalBytes);
+  for (const r of plan.ranges) {
+    const b64 = bufferToBase64(originalBytes.subarray(r.offset, r.end));
+    reassembled.set(base64ToUint8Array(b64), r.offset);
+  }
+
+  // Flip a single byte in the middle chunk
+  reassembled[350 * 1024] ^= 0xff;
+  const tamperedBlob = new Blob([reassembled], { type: 'application/vnd.android.package-archive' });
+  const tamperedCheck = await verifyApkBinary(tamperedBlob, originalSha, targetSize);
+  assert.equal(tamperedCheck.valid, false);
+  assert.match(tamperedCheck.error || '', /SHA-256 hash mismatch/i);
+});
+
+test('Scenario 32: buildDirectApkDownloadUrl formats App-drop subpath and filename encoding safely', async () => {
+  const { buildDirectApkDownloadUrl } = await import('./binaryStorage');
+
+  assert.equal(
+    buildDirectApkDownloadUrl('ver_123', 'Anifam App-v0.0.1.apk', '/App-drop'),
+    '/App-drop/api/apks/ver_123/download?filename=Anifam%20App-v0.0.1.apk'
+  );
+  assert.equal(
+    buildDirectApkDownloadUrl('ver_123', 'MyApp.apk', ''),
+    '/api/apks/ver_123/download?filename=MyApp.apk'
+  );
+});
