@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { Wrench, ShieldCheck, Download, Check } from 'lucide-react';
+import { Wrench, ShieldCheck, Download, Check, AlertTriangle, Key } from 'lucide-react';
 import { ADMIN_CONFIGURED_EMAIL } from '../../lib/firebase';
 
 export const SettingsView: React.FC = () => {
@@ -116,7 +116,7 @@ export const SettingsView: React.FC = () => {
         <div className="p-3.5 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800/40 space-y-1 font-mono">
           <span className="text-neutral-400 text-[11px] block">Master Administrator Email:</span>
           <span className="text-neutral-900 dark:text-white font-bold text-sm">
-            {ADMIN_CONFIGURED_EMAIL || 'Not configured (set VITE_ADMIN_EMAIL in .env or GitHub Secrets)'}
+            {ADMIN_CONFIGURED_EMAIL}
           </span>
         </div>
       </section>

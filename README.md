@@ -7,7 +7,7 @@ AppDrop is a Google Play-inspired distribution hub for Android applications and 
 ## 1. Core Architecture & Features
 
 - **Public Hub**: Responsive, mobile-first Google Play-inspired interface with search, categories, and direct APK download URLs.
-- **Admin Authentication**: Firebase Authentication with Google Sign-in restricted to the configured administrator identity (`VITE_ADMIN_EMAIL` and Firestore `/admins/{uid}` RBAC binding).
+- **Admin Authentication**: Firebase Authentication with Google Sign-in restricted to the configured administrator identity (`mh3620305@gmail.com`).
 - **Automated APK Validation Pipeline**:
   - Validates ZIP archive headers (`0x04034b50`).
   - Verifies Android reverse-DNS package name match against target app.
@@ -53,24 +53,14 @@ AppDrop is a Google Play-inspired distribution hub for Android applications and 
 
 ## 3. Environment Configuration
 
-Copy `.env.example` to `.env` for local development (`.env` is gitignored and must never be committed):
+Copy `.env.example` to `.env` for local development:
 
 ```env
 # Configured Platform Administrator Email
-VITE_ADMIN_EMAIL="admin@example.com"
+VITE_ADMIN_EMAIL="mh3620305@gmail.com"
 
 # Maximum APK upload size in bytes (default 500 MB)
 VITE_MAX_APK_SIZE_BYTES=524288000
-
-# Firebase Web Client Configuration
-VITE_FIREBASE_API_KEY="your-firebase-api-key"
-VITE_FIREBASE_AUTH_DOMAIN="your-project-id.firebaseapp.com"
-VITE_FIREBASE_PROJECT_ID="your-project-id"
-VITE_FIREBASE_STORAGE_BUCKET="your-project-id.firebasestorage.app"
-VITE_FIREBASE_MESSAGING_SENDER_ID="your-messaging-sender-id"
-VITE_FIREBASE_APP_ID="your-firebase-app-id"
-VITE_FIREBASE_FIRESTORE_DATABASE_ID="(default)"
-VITE_FIREBASE_OAUTH_CLIENT_ID=""
 ```
 
 ---
@@ -96,12 +86,3 @@ npm run build
 The repository includes a verified GitHub Actions workflow (`.github/workflows/deploy.yml`):
 1. Pushes to `main` automatically run unit tests and bundle the static frontend to `./dist`.
 2. The workflow utilizes GitHub Pages Actions (`actions/deploy-pages@v4`) with the SPA router hash routing strategy to guarantee that all direct links (`#/apps/:id`, `#/categories/:cat`, `#/admin`) load cleanly without 404s.
-3. Set `ADMIN_EMAIL` and `FIREBASE_*` values under **GitHub Repository Settings → Secrets and variables → Actions** rather than committing credentials in source files.
-
----
-
-## 6. Firebase Console & GitHub Secrets Setup
-
-1. **GitHub Secrets**: Configure `ADMIN_EMAIL`, `FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, `FIREBASE_PROJECT_ID`, `FIREBASE_STORAGE_BUCKET`, `FIREBASE_MESSAGING_SENDER_ID`, `FIREBASE_APP_ID`, `FIREBASE_FIRESTORE_DATABASE_ID`, and optional `FIREBASE_OAUTH_CLIENT_ID` / `DEPLOY_HOOK_URL` under repository Actions secrets.
-2. **Firebase Console Admin RBAC**: In Firestore Database, create a document under collection `admins` with document ID equal to the administrator's Firebase Authentication UID (`admins/{uid}`), and ensure Google Sign-In + Authorized Domains are enabled under Authentication.
-

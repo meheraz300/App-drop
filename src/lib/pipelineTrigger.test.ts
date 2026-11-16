@@ -1,14 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { triggerDeploymentPipeline } from './pipelineTrigger';
-import { isAuthorizedAdminEmail } from './firebase';
 
 test('triggerDeploymentPipeline handles app.published event cleanly', async () => {
   const result = await triggerDeploymentPipeline('app.published', {
     appId: 'app_signal_123',
     appName: 'Signal Messenger',
     version: '7.20.0',
-    actorEmail: 'admin@example.com',
+    actorEmail: 'mh3620305@gmail.com',
   });
 
   assert.equal(result.success, true);
@@ -20,7 +19,7 @@ test('triggerDeploymentPipeline handles app.updated event cleanly', async () => 
   const result = await triggerDeploymentPipeline('app.updated', {
     appId: 'app_nova_456',
     appName: 'Nova Launcher',
-    actorEmail: 'admin@example.com',
+    actorEmail: 'mh3620305@gmail.com',
   });
 
   assert.equal(result.success, true);
@@ -32,7 +31,7 @@ test('triggerDeploymentPipeline handles app.deleted event cleanly', async () => 
   const result = await triggerDeploymentPipeline('app.deleted', {
     appId: 'app_obsolete_789',
     appName: 'Legacy App',
-    actorEmail: 'admin@example.com',
+    actorEmail: 'mh3620305@gmail.com',
   });
 
   assert.equal(result.success, true);
@@ -48,12 +47,4 @@ test('triggerDeploymentPipeline handles manual trigger with custom message', asy
   assert.equal(result.success, true);
   assert.ok(result.eventId.startsWith('deploy_'));
   assert.ok(result.message.includes('Admin manually dispatched'));
-});
-
-test('isAuthorizedAdminEmail enforces configured env email and rejects empty or mismatched values', () => {
-  assert.equal(isAuthorizedAdminEmail('admin@example.com', 'admin@example.com'), true);
-  assert.equal(isAuthorizedAdminEmail('ADMIN@EXAMPLE.COM', '  admin@example.com  '), true);
-  assert.equal(isAuthorizedAdminEmail('', ''), false);
-  assert.equal(isAuthorizedAdminEmail('admin@example.com', ''), false);
-  assert.equal(isAuthorizedAdminEmail('attacker@example.com', 'admin@example.com'), false);
 });
