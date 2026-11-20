@@ -7,9 +7,7 @@ AppDrop is a Google Play-inspired distribution hub for Android applications and 
 ## 1. Core Architecture & Features
 
 - **Public Hub**: Responsive, mobile-first Google Play-inspired interface with search, categories, and direct APK download URLs.
-- **Admin Authentication**: Firebase Authentication with Google Sign-in restricted to the configured administrator identity (`mh3620305@gmail.com`).
-- **Automated APK Validation Pipeline**:
-  - Validates ZIP archive headers (`0x04034b50`).
+- **Automated APK Validation Pipeline**
   - Verifies Android reverse-DNS package name match against target app.
   - Enforces version code bounds and duplicate version code prevention.
   - Computes 64-character SHA-256 cryptographic digest.
@@ -54,10 +52,6 @@ AppDrop is a Google Play-inspired distribution hub for Android applications and 
 ## 3. Environment Configuration
 
 Copy `.env.example` to `.env` for local development:
-
-```env
-# Configured Platform Administrator Email
-VITE_ADMIN_EMAIL="mh3620305@gmail.com"
 
 # Maximum APK upload size in bytes (default 500 MB)
 VITE_MAX_APK_SIZE_BYTES=524288000
